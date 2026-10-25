@@ -12,6 +12,7 @@ import logging
 import os
 import secrets
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -257,6 +258,33 @@ def write_txt(f, playlists, liked_albums):
 			                 '-', album.get('uri') or '', album.get('release_date') or ''])
 
 
+def write_backup(filename, output_format, playlists, liked_albums):
+	filename = os.path.abspath(filename)
+	temporary = None
+	try:
+		# Keep the temporary file on the same filesystem for atomic replacement.
+		with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='',
+		                                 dir=os.path.dirname(filename), prefix='.spotify-backup-',
+		                                 suffix='.tmp', delete=False) as f:
+			temporary = f.name
+			if output_format == 'json':
+				json.dump({'playlists': playlists, 'albums': liked_albums}, f)
+			else:
+				write_txt(f, playlists, liked_albums)
+			f.flush()
+			os.fsync(f.fileno())
+		# Close first: Windows cannot replace a file while it is open.
+		os.replace(temporary, filename)
+	finally:
+		if temporary is not None:
+			try:
+				os.unlink(temporary)
+			except FileNotFoundError:
+				pass
+			except OSError:
+				logging.warning('Could not remove temporary backup: %s', temporary)
+
+
 def main():
 	# Parse arguments.
 	parser = argparse.ArgumentParser(description='Exports your Spotify playlists. By default, opens a browser window '
@@ -295,18 +323,7 @@ def main():
 	
 	# Write the file.
 	logging.info('Writing files...')
-	# The TSV writer emits CRLF separators; avoid translating them again on Windows.
-	with open(args.file, 'w', encoding='utf-8', newline='') as f:
-		# JSON file.
-		if args.format == 'json':
-			json.dump({
-				'playlists': playlists,
-				'albums': liked_albums
-			}, f)
-		
-		# Tab-separated file.
-		else:
-			write_txt(f, playlists, liked_albums)
+	write_backup(args.file, args.format, playlists, liked_albums)
 
 	logging.info('Wrote file: ' + args.file)
 

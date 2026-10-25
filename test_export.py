@@ -1,4 +1,5 @@
 import copy
+from contextlib import contextmanager
 import csv
 import io
 import json
@@ -8,6 +9,77 @@ import unittest
 from unittest.mock import Mock, patch
 
 from test_auth import backup
+
+
+class AtomicWriteTests(unittest.TestCase):
+    def test_write_failures_preserve_previous_backup_and_remove_temporary_file(self):
+        for output_format in ('txt', 'json'):
+            for existing in (False, True):
+                for error in (OSError('disk full'), TypeError('serialization failed'), KeyboardInterrupt()):
+                    with self.subTest(format=output_format, existing=existing, error=type(error)), tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / ('backup.' + output_format)
+                        if existing:
+                            path.write_bytes(b'previous backup')
+
+                        def fail(*args):
+                            stream = args[1] if output_format == 'json' else args[0]
+                            stream.write('partial backup')
+                            raise error
+
+                        target, name = (backup.json, 'dump') if output_format == 'json' else (backup, 'write_txt')
+                        with patch.object(target, name, side_effect=fail):
+                            with self.assertRaises(type(error)):
+                                backup.write_backup(path, output_format, [], [])
+                        self.assertEqual(path.read_bytes() if existing else path.exists(),
+                                         b'previous backup' if existing else False)
+                        self.assertEqual(list(Path(directory).iterdir()), [path] if existing else [])
+
+    def test_close_sync_and_replace_failures_preserve_destination(self):
+        factory = backup.tempfile.NamedTemporaryFile
+
+        @contextmanager
+        def bad_close(**kwargs):
+            with factory(**kwargs) as stream:
+                yield stream
+            raise OSError('close failed')
+
+        for output_format in ('txt', 'json'):
+            for existing in (False, True):
+                for failure in ('close', 'sync', 'replace'):
+                    with self.subTest(format=output_format, existing=existing, failure=failure), tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / 'backup'
+                        if existing:
+                            path.write_bytes(b'previous backup')
+                        if failure == 'close':
+                            fault = patch.object(backup.tempfile, 'NamedTemporaryFile', side_effect=bad_close)
+                        else:
+                            fault = patch.object(backup.os, 'fsync' if failure == 'sync' else 'replace', side_effect=OSError(failure))
+                        with fault, self.assertRaises(OSError):
+                            backup.write_backup(path, output_format, [], [])
+                        self.assertEqual(path.read_bytes() if existing else path.exists(),
+                                         b'previous backup' if existing else False)
+                        self.assertEqual(list(Path(directory).iterdir()), [path] if existing else [])
+
+    def test_real_serialization_failure_keeps_previous_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            path.write_bytes(b'previous backup')
+            with self.assertRaises(TypeError):
+                backup.write_backup(path, 'json', [{'unsupported': object()}], [])
+            self.assertEqual(path.read_bytes(), b'previous backup')
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_success_replaces_existing_backup_in_both_formats(self):
+        for output_format in ('txt', 'json'):
+            with self.subTest(format=output_format), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'backup'
+                path.write_bytes(b'previous backup')
+                backup.write_backup(path, output_format, [], [])
+                if output_format == 'json':
+                    self.assertEqual(json.loads(path.read_text()), {'playlists': [], 'albums': []})
+                else:
+                    self.assertEqual(path.read_bytes(), b'Playlists: \r\n\r\n')
+                self.assertEqual(list(Path(directory).iterdir()), [path])
 
 
 class TextExportTests(unittest.TestCase):
