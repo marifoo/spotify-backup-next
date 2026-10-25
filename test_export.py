@@ -228,6 +228,34 @@ class AtomicWriteTests(unittest.TestCase):
 
 
 class TextExportTests(unittest.TestCase):
+    def test_formula_prefixes_are_neutralized_in_every_metadata_column(self):
+        payloads = ['=1+1', '+1+1', '-1+1', '@SUM(1)', '\uff1d1+1', '\uff0b1+1', '\uff0d1+1', '\uff20SUM(1)',
+                    ' =1+1', '\t=1+1', '\r=1+1', '\n=1+1', '\x00=1+1', '\x1f=1+1', '\x7f=1+1',
+                    '\ufeff=1+1', '\u200b=1+1', '\u00a0=1+1', '=HYPERLINK("https://example.invalid", "click")',
+                    '=1\t"quoted"\r\nnext']
+        for payload in payloads:
+            with self.subTest(payload=repr(payload)):
+                track = {'name': payload, 'artists': [{'name': payload}], 'uri': payload,
+                         'album': {'name': payload, 'release_date': payload}}
+                episode = {'name': payload, 'type': 'episode', 'uri': payload, 'release_date': payload,
+                           'show': {'name': payload, 'publisher': payload}}
+                album = {'name': payload, 'artists': [{'name': payload}], 'uri': payload, 'release_date': payload}
+                playlists = [{'name': payload, 'tracks': [{'track': track}, {'track': episode}]}]
+                albums = [{'album': album}]
+                original = copy.deepcopy((playlists, albums))
+                output = io.StringIO(newline='')
+                backup.write_txt(output, playlists, albums)
+                rows = list(csv.reader(io.StringIO(output.getvalue(), newline=''), delimiter='\t', strict=True))
+                escaped = "'" + payload
+                self.assertEqual(rows, [['Playlists: '], [], [escaped], [escaped] * 5, [escaped] * 5,
+                                        [], ['Liked Albums: '], [], [escaped, escaped, '-', escaped, escaped]])
+                self.assertEqual((playlists, albums), original)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'backup.json'
+                    backup.write_backup(path, 'json', playlists, albums)
+                    self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
+                                     {'playlists': original[0], 'albums': original[1]})
+
     def test_cli_writes_single_crlf_separators(self):
         spotify = Mock()
         spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester'}

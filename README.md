@@ -64,9 +64,13 @@ To combine them with only your own playlists, use:
 Both comma-separated selections accept either order, so `playlists,liked` and
 `own-playlists,liked` also work. Omitting `--dump` still selects all playlists.
 
-TXT exports quote fields containing tabs, line breaks, or double quotes so their
-contents are preserved. Import these files as tab-delimited text with double
-quotes as the text qualifier in your spreadsheet application.
+TXT exports quote fields containing tabs, line breaks, or double quotes. To
+reduce spreadsheet formula injection, metadata cells starting with `=`, `+`,
+`-`, `@`, their full-width variants, whitespace, or control/format characters
+receive a leading apostrophe. This marker is part of the TXT data; JSON preserves
+the original values. Import TXT files as tab-delimited text with double quotes
+as the text qualifier, and explicitly set **all columns to text**. Spreadsheet
+formula handling varies; do not enable formula evaluation when importing.
 
 After saving a TXT export, the script reports exported and unavailable entry
 counts for each playlist and for any saved album entries. Unavailable entries
@@ -77,6 +81,11 @@ unavailable song or album.
 Playlist exports automatically support Spotify's legacy and updated API response
 formats; no CLI switch is needed. JSON keeps the existing `playlists[].tracks[]`
 entries with a `track` field, including null entries and other item metadata.
+The script checks each playlist's version immediately before and after fetching
+its contents. A changed version or a failed version check stops the export before
+creating or replacing the backup; retry once editing has stopped. JSON records
+the verified version in `snapshot_id`. This check applies to playlist contents;
+Liked Songs and saved albums do not provide the same version check.
 
 Under Spotify's updated Development Mode restrictions, playlist contents are only
 available for playlists you own or collaborate on. If playlist contents are

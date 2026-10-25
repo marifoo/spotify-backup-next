@@ -14,6 +14,7 @@ import secrets
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -263,6 +264,13 @@ def validate_entries(entries, field, label):
 				raise ExportError('Spotify returned malformed artists in {}.'.format(label))
 
 
+def playlist_snapshot(spotify, playlist_id):
+	metadata = spotify.get('playlists/' + urllib.parse.quote(playlist_id, safe=''), {'fields': 'snapshot_id'})
+	if not isinstance(metadata, dict) or not isinstance(metadata.get('snapshot_id'), str) or not metadata['snapshot_id']:
+		raise ExportError('Spotify did not return a valid playlist version. Please retry.')
+	return metadata['snapshot_id']
+
+
 def load_playlist(spotify, playlist):
 	if not isinstance(playlist, dict) or not isinstance(playlist.get('name'), str):
 		raise ExportError('Spotify returned malformed playlist metadata.')
@@ -273,12 +281,21 @@ def load_playlist(spotify, playlist):
 		raise ExportError('Cannot export playlist {}: Spotify did not expose its contents. '
 		                  'Development Mode apps may only read playlists you own or collaborate on.'.format(label))
 	logging.info('Loading playlist: %s (%s items)', label, collection.get('total', 'unknown'))
+	playlist_id = playlist.get('id')
+	if not isinstance(playlist_id, str) or not playlist_id:
+		raise ExportError('Cannot export playlist {}: Spotify did not return a valid playlist ID.'.format(label))
 	try:
+		# Counts cannot detect reorders or replacements between pages. Bracket
+		# the download with fresh version checks, including single-page playlists.
+		snapshot = playlist_snapshot(spotify, playlist_id)
 		entries = spotify.list(collection['href'], {'limit': 50, 'additional_types': 'track,episode'})
+		if playlist_snapshot(spotify, playlist_id) != snapshot:
+			raise ExportError('Playlist changed during download. Please retry the export.')
 	except ExportError as err:
 		raise ExportError('Could not export playlist {}. Check playlist access and token scopes. {}'.format(label, err)) from None
 	# Keep the existing export schema and all other metadata, including null items.
 	result = dict(playlist)
+	result['snapshot_id'] = snapshot
 	result.pop('items', None)
 	result['tracks'] = []
 	for entry in entries:
@@ -326,6 +343,16 @@ def load_backup(spotify, dump):
 	return playlists, liked_albums
 
 
+def spreadsheet_text(value):
+	# CSV quoting protects field boundaries, but spreadsheet importers may
+	# still evaluate formulas. Put a text marker before risky prefixes,
+	# including whitespace/controls that can disguise a formula starter.
+	if value and (value[0] in '=+-@\uff1d\uff0b\uff0d\uff20' or value[0].isspace()
+	              or unicodedata.category(value[0]).startswith('C')):
+		return "'" + value
+	return value
+
+
 def write_txt(f, playlists, liked_albums):
 	writer = csv.writer(f, delimiter='\t', lineterminator='\r\n')
 	summaries = []
@@ -333,7 +360,7 @@ def write_txt(f, playlists, liked_albums):
 	writer.writerow([])
 	for playlist in playlists:
 		exported, unavailable = 0, 0
-		writer.writerow([playlist['name']])
+		writer.writerow([spreadsheet_text(playlist['name'])])
 		for entry in playlist['tracks']:
 			track = entry.get('track')
 			# Spotify can return null for unavailable or removed items.
@@ -350,8 +377,8 @@ def write_txt(f, playlists, liked_albums):
 				artists = artist_names(track.get('artists'))
 				album = metadata.get('name') or 'Unknown Album'
 				release_date = metadata.get('release_date') or ''
-			writer.writerow([track.get('name') or 'Unknown Track', artists, album,
-			                 track.get('uri') or '', release_date])
+			writer.writerow([spreadsheet_text(value) for value in (
+				track.get('name') or 'Unknown Track', artists, album, track.get('uri') or '', release_date)])
 			exported += 1
 		writer.writerow([])
 		summaries.append((playlist['name'], exported, unavailable))
@@ -364,8 +391,9 @@ def write_txt(f, playlists, liked_albums):
 			if album is None:
 				unavailable += 1
 				continue
-			writer.writerow([album.get('name') or 'Unknown Album', artist_names(album.get('artists')),
-			                 '-', album.get('uri') or '', album.get('release_date') or ''])
+			writer.writerow([spreadsheet_text(album.get('name') or 'Unknown Album'),
+			                 spreadsheet_text(artist_names(album.get('artists'))), '-',
+			                 spreadsheet_text(album.get('uri') or ''), spreadsheet_text(album.get('release_date') or '')])
 			exported += 1
 		summaries.append(('Liked Albums', exported, unavailable))
 	return summaries
