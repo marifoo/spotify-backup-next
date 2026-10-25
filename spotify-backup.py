@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
 import argparse 
+import base64
 import codecs
+import hashlib
 import http.client
 import http.server
 import json
 import logging
-import re
+import os
+import secrets
 import sys
 import time
 import urllib.error
@@ -61,69 +64,99 @@ class SpotifyAPI:
 			items += response['items']
 		return items
 	
-	# Pops open a browser window for a user to log in and authorize API access.
 	@staticmethod
 	def authorize(client_id, scope):
+		verifier = secrets.token_urlsafe(48)
+		challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('ascii')).digest()).rstrip(b'=').decode('ascii')
+		state = secrets.token_urlsafe(32)
+		redirect_uri = 'http://127.0.0.1:{}/redirect'.format(SpotifyAPI._SERVER_PORT)
 		url = 'https://accounts.spotify.com/authorize?' + urllib.parse.urlencode({
-			'response_type': 'token',
-			'client_id': client_id,
-			'scope': scope,
-			'redirect_uri': 'http://127.0.0.1:{}/redirect'.format(SpotifyAPI._SERVER_PORT)
+			'response_type': 'code', 'client_id': client_id, 'scope': scope,
+			'redirect_uri': redirect_uri, 'state': state,
+			'code_challenge_method': 'S256', 'code_challenge': challenge
 		})
-		logging.info(f'Logging in (click if it doesn\'t open automatically): {url}')
-		webbrowser.open(url)
-	
-		# Start a simple, local HTTP server to listen for the authorization token... (i.e. a hack).
-		server = SpotifyAPI._AuthorizationServer('127.0.0.1', SpotifyAPI._SERVER_PORT)
 		try:
-			while True:
-				server.handle_request()
-		except SpotifyAPI._Authorization as auth:
-			return SpotifyAPI(auth.access_token)
-	
-	# The port that the local server listens on. Don't change this,
-	# as Spotify only will redirect to certain predefined URLs.
+			with SpotifyAPI._AuthorizationServer(('127.0.0.1', SpotifyAPI._SERVER_PORT),
+			                                     SpotifyAPI._AuthorizationHandler) as server:
+				server.state, server.code, server.error = state, None, None
+				deadline = time.monotonic() + 300
+				logging.info(f'Logging in (click if it does not open automatically): {url}')
+				webbrowser.open(url)
+				while server.code is None and server.error is None:
+					remaining = deadline - time.monotonic()
+					if remaining <= 0:
+						raise SpotifyAPI.AuthorizationError('Login timed out. Run the script again to retry.')
+					server.timeout = min(1, remaining)
+					server.handle_request()
+				if server.error:
+					raise SpotifyAPI.AuthorizationError(server.error)
+				code = server.code
+		except OSError as err:
+			raise SpotifyAPI.AuthorizationError('Could not start or use the local login server: {}'.format(err)) from None
+		return SpotifyAPI(SpotifyAPI._exchange_authorization_code(client_id, verifier, redirect_uri, code))
+
+	@staticmethod
+	def _exchange_authorization_code(client_id, verifier, redirect_uri, code):
+		data = urllib.parse.urlencode({
+			'grant_type': 'authorization_code', 'client_id': client_id,
+			'code_verifier': verifier, 'redirect_uri': redirect_uri, 'code': code
+		}).encode('ascii')
+		req = urllib.request.Request('https://accounts.spotify.com/api/token', data=data,
+		                             headers={'Content-Type': 'application/x-www-form-urlencoded'})
+		try:
+			with urllib.request.urlopen(req, timeout=30) as response:
+				result = json.load(response)
+		except urllib.error.HTTPError as err:
+			raise SpotifyAPI.AuthorizationError(
+				'Could not complete Spotify login (HTTP {}). Retry, or see README.md for custom client ID setup.'.format(err.code)) from None
+		except (OSError, urllib.error.URLError, ValueError):
+			raise SpotifyAPI.AuthorizationError('Could not complete Spotify login. Check your connection and retry.') from None
+		if not isinstance(result, dict) or not isinstance(result.get('access_token'), str) or not result['access_token']:
+			raise SpotifyAPI.AuthorizationError('Spotify did not return an access token. Please retry login.')
+		return result['access_token']
+
 	_SERVER_PORT = 43019
-	
+
+	class AuthorizationError(Exception):
+		pass
+
 	class _AuthorizationServer(http.server.HTTPServer):
-		def __init__(self, host, port):
-			http.server.HTTPServer.__init__(self, (host, port), SpotifyAPI._AuthorizationHandler)
-		
-		# Disable the default error handling.
-		def handle_error(self, request, client_address):
-			raise
-	
+		def get_request(self):
+			connection, address = super().get_request()
+			connection.settimeout(5)
+			return connection, address
+
 	class _AuthorizationHandler(http.server.BaseHTTPRequestHandler):
 		def do_GET(self):
-			# The Spotify API has redirected here, but access_token is hidden in the URL fragment.
-			# Read it using JavaScript and send it to /token as an actual query string...
-			if self.path.startswith('/redirect'):
-				self.send_response(200)
-				self.send_header('Content-Type', 'text/html')
-				self.end_headers()
-				self.wfile.write(b'<script>location.replace("token?" + location.hash.slice(1));</script>')
-			
-			# Read access_token and use an exception to kill the server listening...
-			elif self.path.startswith('/token?'):
-				self.send_response(200)
-				self.send_header('Content-Type', 'text/html')
-				self.end_headers()
-				self.wfile.write(b'<script>close()</script>Thanks! You may now close this window.')
-
-				access_token = re.search('access_token=([^&]*)', self.path).group(1)
-				logging.info(f'Received access token from Spotify: {access_token}')
-				raise SpotifyAPI._Authorization(access_token)
-			
-			else:
+			parsed = urllib.parse.urlsplit(self.path)
+			if parsed.path != '/redirect':
 				self.send_error(404)
-		
-		# Disable the default logging.
+				return
+			params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+			# Ignore unsolicited callbacks so they cannot cancel a valid login.
+			if params.get('state') != [self.server.state]:
+				self._reply(400, 'Invalid login state. Please return to the Spotify login window.')
+				return
+			if 'error' in params:
+				self.server.error = 'Spotify authorization was denied or failed. Run the script again to retry.'
+			elif len(params.get('code', [])) != 1 or not params['code'][0]:
+				self.server.error = 'Spotify did not return a valid authorization code. Please retry login.'
+			else:
+				self.server.code = params['code'][0]
+			self._reply(400 if self.server.error else 200,
+			            self.server.error or 'Authorization received. You may close this window and return to the script.')
+
+		def _reply(self, status, message):
+			body = message.encode('utf-8')
+			self.send_response(status)
+			self.send_header('Content-Type', 'text/plain; charset=utf-8')
+			self.send_header('Content-Length', str(len(body)))
+			self.send_header('Cache-Control', 'no-store')
+			self.end_headers()
+			self.wfile.write(body)
+
 		def log_message(self, format, *args):
 			pass
-	
-	class _Authorization(Exception):
-		def __init__(self, access_token):
-			self.access_token = access_token
 
 
 def main():
@@ -136,6 +169,8 @@ def main():
 	parser.add_argument('--dump', default='playlists', choices=['liked,playlists', 'playlists,liked', 'playlists', 'liked'],
 	                    help='dump playlists or liked songs, or both (default: playlists)')
 	parser.add_argument('--format', default='txt', choices=['json', 'txt'], help='output format (default: txt)')
+	parser.add_argument('--client-id', default=os.environ.get('SPOTIFY_CLIENT_ID'),
+	                    help='Spotify app client ID (default: SPOTIFY_CLIENT_ID or bundled app)')
 	parser.add_argument('file', help='output filename', nargs='?')
 	args = parser.parse_args()
 	
@@ -148,8 +183,11 @@ def main():
 	if args.token:
 		spotify = SpotifyAPI(args.token)
 	else:
-		spotify = SpotifyAPI.authorize(client_id='5c098bcc800e45d49e476265bc9b6934',
-		                               scope='playlist-read-private playlist-read-collaborative user-library-read')
+		try:
+			spotify = SpotifyAPI.authorize(client_id=args.client_id or '5c098bcc800e45d49e476265bc9b6934',
+			                               scope='playlist-read-private playlist-read-collaborative user-library-read')
+		except SpotifyAPI.AuthorizationError as err:
+			parser.exit(1, 'Authorization failed: {}\n'.format(err))
 	
 	# Get the ID of the logged in user.
 	logging.info('Loading user info...')
