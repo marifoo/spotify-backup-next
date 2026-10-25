@@ -40,6 +40,34 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(backup.SpotifyAPI('token').get('me/tracks'), {})
         sleep.assert_called_once_with(2)
 
+    def test_request_timeouts_retry_and_recover(self):
+        for error in (TimeoutError('connection stalled'), urllib.error.URLError(TimeoutError())):
+            with self.subTest(error=error):
+                response = io.BytesIO(b'{"items": []}')
+                with patch.object(backup.urllib.request, 'urlopen', side_effect=[error, response]) as send, patch.object(backup.time, 'sleep') as sleep:
+                    self.assertEqual(backup.SpotifyAPI('token').get('me/tracks'), {'items': []})
+                for request in send.call_args_list:
+                    self.assertEqual(request.kwargs['timeout'], 30)
+                sleep.assert_called_once_with(2)
+                self.assertTrue(response.closed)
+
+    def test_body_read_timeout_closes_response_and_retries(self):
+        stalled_response = io.BytesIO(b'')
+        response = io.BytesIO(b'{}')
+        with patch.object(stalled_response, 'read', side_effect=TimeoutError('body stalled')), patch.object(backup.urllib.request, 'urlopen', side_effect=[stalled_response, response]), patch.object(backup.time, 'sleep') as sleep:
+            self.assertEqual(backup.SpotifyAPI('token').get('me/tracks'), {})
+        self.assertTrue(stalled_response.closed)
+        self.assertTrue(response.closed)
+        sleep.assert_called_once_with(2)
+
+    def test_repeated_timeouts_exhaust_retries(self):
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=TimeoutError()) as send, patch.object(backup.time, 'sleep') as sleep:
+            with self.assertRaises(SystemExit) as exited:
+                backup.SpotifyAPI('token').get('me/tracks')
+        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(2), call(2)])
+
 
 if __name__ == '__main__':
     unittest.main()

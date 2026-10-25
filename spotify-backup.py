@@ -39,9 +39,9 @@ class SpotifyAPI:
 			try:
 				req = urllib.request.Request(url)
 				req.add_header('Authorization', 'Bearer ' + self._auth)
-				res = urllib.request.urlopen(req)
-				reader = codecs.getreader('utf-8')
-				return json.load(reader(res))
+				with urllib.request.urlopen(req, timeout=30) as res:
+					reader = codecs.getreader('utf-8')
+					return json.load(reader(res))
 			except Exception as err:
 				logging.info('Couldn\'t load URL: {} ({})'.format(url, err))
 				if attempt + 1 < tries:
