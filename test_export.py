@@ -1,4 +1,5 @@
 import copy
+import csv
 import io
 import json
 from pathlib import Path
@@ -31,8 +32,8 @@ class TextExportTests(unittest.TestCase):
     def test_json_file_keeps_original_structure(self):
         spotify = Mock()
         spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester'}
-        tracks = [{'track': {'name': 'Song'}}]
-        albums = [{'album': {'name': 'Saved'}}]
+        tracks = [{'track': {'name': 'Song\t"quoted"\r\nnext'}}]
+        albums = [{'album': {'name': 'Saved\t"quoted"\r\nnext'}}]
         spotify.list.side_effect = [tracks, albums]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.json'
@@ -71,6 +72,31 @@ class TextExportTests(unittest.TestCase):
         self.assertIn('Unknown Artist, Unknown Artist', text)
         self.assertIn('Unknown Track\tUnknown Artist\tUnknown Show\t\t\r\n', text)
         self.assertIn('Unknown Album\tUnknown Artist\t-\t\t\r\n', text)
+
+    def test_tabs_newlines_and_quotes_round_trip_in_all_text_fields(self):
+        playlist_name = 'Playlist\t"quoted"\r\nnext'
+        track = {'name': 'Song\t"quoted"\nnext', 'artists': [{'name': 'Artist\t"quoted"\rnext'}],
+                 'album': {'name': 'Album\t"quoted"\r\nnext', 'release_date': '2020\tdate'},
+                 'uri': 'spotify:track:1'}
+        episode = {'type': 'episode', 'name': 'Episode\t"quoted"\r\nnext',
+                   'show': {'name': 'Show\t"quoted"\nnext', 'publisher': 'Publisher\t"quoted"\rnext'},
+                   'release_date': '2024-01-01', 'uri': 'spotify:episode:1'}
+        album = {'name': 'Saved\t"quoted"\r\nnext', 'artists': [{'name': 'Other\t"quoted"\nnext'}],
+                 'uri': 'spotify:album:2', 'release_date': '2021'}
+        playlists = [{'name': playlist_name, 'tracks': [{'track': track}, {'track': episode}]}]
+        original = copy.deepcopy(playlists)
+        output = io.StringIO(newline='')
+        backup.write_txt(output, playlists, [{'album': album}])
+        output.seek(0)
+        rows = list(csv.reader(output, delimiter='\t', strict=True))
+        self.assertEqual(rows, [
+            ['Playlists: '], [], [playlist_name],
+            [track['name'], track['artists'][0]['name'], track['album']['name'], track['uri'], '2020\tdate'],
+            [episode['name'], episode['show']['publisher'], episode['show']['name'], episode['uri'], '2024-01-01'],
+            [], ['Liked Albums: '], [],
+            [album['name'], album['artists'][0]['name'], '-', album['uri'], '2021'],
+        ])
+        self.assertEqual(playlists, original)
 
 
 if __name__ == '__main__':

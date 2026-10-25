@@ -3,6 +3,7 @@
 import argparse 
 import base64
 import codecs
+import csv
 import hashlib
 import http.client
 import http.server
@@ -173,9 +174,11 @@ def artist_names(artists):
 
 
 def write_txt(f, playlists, liked_albums):
-	f.write('Playlists: \r\n\r\n')
+	writer = csv.writer(f, delimiter='\t', lineterminator='\r\n')
+	writer.writerow(['Playlists: '])
+	writer.writerow([])
 	for playlist in playlists:
-		f.write(playlist['name'] + '\r\n')
+		writer.writerow([playlist['name']])
 		for entry in playlist['tracks']:
 			track = entry.get('track')
 			# Spotify can return null for unavailable or removed items.
@@ -191,19 +194,18 @@ def write_txt(f, playlists, liked_albums):
 				artists = artist_names(track.get('artists'))
 				album = metadata.get('name') or 'Unknown Album'
 				release_date = metadata.get('release_date') or ''
-			f.write('{name}\t{artists}\t{album}\t{uri}\t{release_date}\r\n'.format(
-				name=track.get('name') or 'Unknown Track', artists=artists, album=album,
-				uri=track.get('uri') or '', release_date=release_date))
-		f.write('\r\n')
+			writer.writerow([track.get('name') or 'Unknown Track', artists, album,
+			                 track.get('uri') or '', release_date])
+		writer.writerow([])
 	if liked_albums:
-		f.write('Liked Albums: \r\n\r\n')
+		writer.writerow(['Liked Albums: '])
+		writer.writerow([])
 		for entry in liked_albums:
 			album = entry.get('album')
 			if album is None:
 				continue
-			f.write('{name}\t{artists}\t-\t{uri}\t{release_date}\r\n'.format(
-				name=album.get('name') or 'Unknown Album', artists=artist_names(album.get('artists')),
-				uri=album.get('uri') or '', release_date=album.get('release_date') or ''))
+			writer.writerow([album.get('name') or 'Unknown Album', artist_names(album.get('artists')),
+			                 '-', album.get('uri') or '', album.get('release_date') or ''])
 
 
 def main():
@@ -266,7 +268,7 @@ def main():
 	
 	# Write the file.
 	logging.info('Writing files...')
-	# TXT writes explicit CRLF separators; avoid translating them again on Windows.
+	# The TSV writer emits CRLF separators; avoid translating them again on Windows.
 	with open(args.file, 'w', encoding='utf-8', newline='') as f:
 		# JSON file.
 		if args.format == 'json':

@@ -24,6 +24,10 @@ To export only your Liked Songs and saved albums, use:
 
 `--dump=liked` always includes both songs and albums, in TXT and JSON output.
 
+TXT exports quote fields containing tabs, line breaks, or double quotes so their
+contents are preserved. Import these files as tab-delimited text with double
+quotes as the text qualifier in your spreadsheet application.
+
 Browser login uses Authorization Code with PKCE. No client secret or additional
 Python packages are required. The script opens Spotify directly, receives the
 authorization on your computer, and keeps the access token in memory without
