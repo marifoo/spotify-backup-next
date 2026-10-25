@@ -11,6 +11,61 @@ from unittest.mock import Mock, patch
 from test_auth import backup
 
 
+class OutputPathTests(unittest.TestCase):
+    def assert_preflight_failure(self, path):
+        with patch.object(backup.sys, 'argv', ['script', str(path), '--format=txt']), patch.object(backup.SpotifyAPI, 'authorize') as authorize, patch.object(backup, 'load_backup') as load, patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as error:
+                backup.main()
+            self.assertEqual(error.exception.code, 1)
+            self.assertIn('Cannot write backup', stderr.getvalue())
+            self.assertIn('permissions', stderr.getvalue())
+            self.assertNotIn('Traceback', stderr.getvalue())
+            authorize.assert_not_called()
+            load.assert_not_called()
+
+    def test_invalid_destination_fails_before_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assert_preflight_failure(Path(directory) / 'missing' / 'backup.txt')
+            self.assert_preflight_failure(directory)
+            self.assert_preflight_failure('bad\0name.txt')
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_readonly_destination_and_unwritable_parent_fail_before_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.txt'
+            path.write_bytes(b'previous backup')
+            with patch.object(backup.os, 'access', return_value=False):
+                self.assert_preflight_failure(path)
+            with patch.object(backup.tempfile, 'TemporaryFile', side_effect=PermissionError('parent denied')):
+                self.assert_preflight_failure(path)
+            self.assertEqual(path.read_bytes(), b'previous backup')
+
+    def test_preflight_does_not_touch_backup_or_leave_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.txt'
+            path.write_bytes(b'previous backup')
+            self.assertEqual(backup.check_output_path(str(path)), str(path.resolve()))
+            self.assertEqual(path.read_bytes(), b'previous backup')
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_cli_write_failures_report_path_and_preserve_previous_backup(self):
+        for output_format in ('txt', 'json'):
+            for failure in (PermissionError('replacement denied'), OSError('disk full'), TypeError('invalid data')):
+                with self.subTest(format=output_format, failure=type(failure)), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'backup'
+                    path.write_bytes(b'previous backup')
+                    with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test', '--format=' + output_format]), patch.object(backup, 'load_backup', return_value=([], [])), patch.object(backup.os, 'replace', side_effect=failure), patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
+                        with self.assertRaises(SystemExit) as error:
+                            backup.main()
+                        self.assertEqual(error.exception.code, 1)
+                        self.assertIn('Could not write backup', stderr.getvalue())
+                        self.assertIn('backup', stderr.getvalue())
+                        self.assertIn('permissions', stderr.getvalue())
+                        self.assertNotIn('Traceback', stderr.getvalue())
+                    self.assertEqual(path.read_bytes(), b'previous backup')
+                    self.assertEqual(list(Path(directory).iterdir()), [path])
+
+
 class CLIFormatTests(unittest.TestCase):
     def test_format_precedence_is_consistent_for_positional_and_prompted_paths(self):
         cases = [('backup.json', None, 'json'), ('backup.JSON', None, 'json'),

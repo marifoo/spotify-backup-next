@@ -324,6 +324,25 @@ def write_txt(f, playlists, liked_albums):
 			                 '-', album.get('uri') or '', album.get('release_date') or ''])
 
 
+def check_output_path(filename):
+	try:
+		if '\0' in filename:
+			raise ValueError('filename contains a null character')
+		filename = os.path.abspath(filename)
+		if os.path.lexists(filename):
+			if not os.path.isfile(filename):
+				raise OSError('destination is not a regular file')
+			if not os.access(filename, os.W_OK):
+				raise PermissionError('destination is not writable')
+		# Probe the parent without touching an existing backup. Actual writes can
+		# still fail later if permissions, available space, or the path change.
+		with tempfile.TemporaryFile(dir=os.path.dirname(filename), prefix='.spotify-backup-check-'):
+			pass
+	except (OSError, ValueError) as err:
+		raise ExportError('Cannot write backup to {!r}: {}. Check the directory and permissions.'.format(filename, err)) from None
+	return filename
+
+
 def write_backup(filename, output_format, playlists, liked_albums):
 	filename = os.path.abspath(filename)
 	temporary = None
@@ -383,6 +402,10 @@ def main():
 		if suffix not in formats:
 			parser.error('Cannot infer output format from the filename. Use --format=txt or --format=json.')
 		args.format = formats[suffix]
+	try:
+		args.file = check_output_path(args.file)
+	except ExportError as err:
+		parser.exit(1, 'Export failed: {}\n'.format(err))
 	
 	# Log into the Spotify API.
 	if args.token:
@@ -401,7 +424,12 @@ def main():
 	
 	# Write the file.
 	logging.info('Writing files...')
-	write_backup(args.file, args.format, playlists, liked_albums)
+	try:
+		write_backup(args.file, args.format, playlists, liked_albums)
+	except (OSError, ValueError, TypeError, csv.Error) as err:
+		parser.exit(1, 'Could not write backup to {!r}: {}. Check free disk space and permissions.\n'.format(args.file, err))
+	except KeyboardInterrupt:
+		parser.exit(130, 'Export cancelled while writing the backup.\n')
 
 	logging.info('Wrote file: ' + args.file)
 
