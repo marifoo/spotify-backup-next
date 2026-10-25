@@ -11,6 +11,93 @@ import urllib.parse
 from test_auth import backup
 
 
+class PlaylistSelectionTests(unittest.TestCase):
+    def test_cli_own_selection_filters_all_pages_before_loading_contents(self):
+        for selection in ('own-playlists', 'liked,own-playlists', 'own-playlists,liked'):
+            for output_format in ('txt', 'json'):
+                with self.subTest(selection=selection, format=output_format), tempfile.TemporaryDirectory() as directory:
+                    requested = []
+                    own_first = {'name': 'Own first', 'owner': {'id': 'tester'}, 'items': {'href': 'playlists/first/items'}}
+                    own_last = {'name': 'Own last', 'owner': {'id': 'tester'}, 'tracks': {'href': 'playlists/last/tracks'}}
+                    followed = {'name': 'Followed', 'owner': {'id': 'other'}}
+                    collaborative = {'name': 'Collaborative', 'owner': {'id': 'other'}, 'collaborative': True}
+
+                    def respond(url, params=None):
+                        requested.append(url)
+                        return {
+                            'me': {'id': 'tester'},
+                            'me/playlists': {'items': [followed, own_first], 'next': 'me/playlists?offset=50'},
+                            'me/playlists?offset=50': {'items': [collaborative, own_last], 'next': None},
+                            'playlists/first/items': {'items': [{'item': {'name': 'First song'}}], 'next': None},
+                            'playlists/last/tracks': {'items': [{'track': {'name': 'Last song'}}], 'next': None},
+                            'me/tracks': {'items': [{'track': {'name': 'Liked song'}}], 'next': None},
+                            'me/albums': {'items': [{'album': {'name': 'Saved album'}}], 'next': None},
+                        }[url]
+
+                    path = Path(directory) / ('backup.' + output_format)
+                    argv = ['script', str(path), '--token=test', '--dump=' + selection]
+                    with patch.object(backup.sys, 'argv', argv), patch.object(backup.SpotifyAPI, 'get', side_effect=respond):
+                        backup.main()
+                    contents = path.read_text(encoding='utf-8')
+                    if output_format == 'json':
+                        result = json.loads(contents)
+                        names = [playlist['name'] for playlist in result['playlists']]
+                        expected = ['Own first', 'Own last']
+                        if 'liked' in selection:
+                            expected.insert(0, 'Liked Songs')
+                        self.assertEqual(names, expected)
+                        self.assertEqual([album['album']['name'] for album in result['albums']],
+                                         ['Saved album'] if 'liked' in selection else [])
+                    else:
+                        self.assertIn('First song', contents)
+                        self.assertIn('Last song', contents)
+                        self.assertNotIn('Followed', contents)
+                        self.assertNotIn('Collaborative', contents)
+                        self.assertEqual('Liked song' in contents, 'liked' in selection)
+                        self.assertEqual('Saved album' in contents, 'liked' in selection)
+                    self.assertIn('me/playlists?offset=50', requested)
+                    self.assertLess(requested.index('playlists/first/items'), requested.index('playlists/last/tracks'))
+
+    def test_all_selection_includes_owned_followed_and_collaborative_playlists(self):
+        spotify = Mock()
+        spotify.get.return_value = {'id': 'tester'}
+        playlists = [
+            {'name': 'Own', 'owner': {'id': 'tester'}, 'tracks': {'href': 'own'}},
+            {'name': 'Followed', 'owner': {'id': 'other'}, 'tracks': {'href': 'followed'}},
+            {'name': 'Collaborative', 'owner': {'id': 'other'}, 'collaborative': True, 'tracks': {'href': 'collaborative'}},
+        ]
+        spotify.list.side_effect = [playlists, [], [], []]
+        result, albums = backup.load_backup(spotify, 'playlists')
+        self.assertEqual([playlist['name'] for playlist in result], ['Own', 'Followed', 'Collaborative'])
+        self.assertEqual(albums, [])
+        self.assertEqual(spotify.list.call_args_list, [call('me/playlists', {'limit': 50})] + [
+            call(url, {'limit': 50, 'additional_types': 'track,episode'})
+            for url in ('own', 'followed', 'collaborative')])
+
+    def test_no_owned_playlists_exports_empty_collection_without_loading_followed(self):
+        spotify = Mock()
+        spotify.get.return_value = {'id': 'tester'}
+        spotify.list.return_value = [{'name': 'Followed', 'owner': {'id': 'other'}}]
+        self.assertEqual(backup.load_backup(spotify, 'own-playlists'), ([], []))
+        spotify.list.assert_called_once_with('me/playlists', {'limit': 50})
+
+    def test_invalid_owner_stops_own_export_and_preserves_previous_backup(self):
+        for owner in (None, [], {}, {'id': None}, {'id': ''}, {'id': 123}):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'backup.json'
+                path.write_bytes(b'previous backup')
+                spotify = Mock()
+                spotify.get.return_value = {'id': 'tester'}
+                spotify.list.return_value = [{'name': 'Unknown owner', 'owner': owner}]
+                with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test', '--dump=own-playlists']), patch.object(backup, 'SpotifyAPI', return_value=spotify), patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
+                    with self.assertRaises(SystemExit) as error:
+                        backup.main()
+                self.assertEqual(error.exception.code, 1)
+                self.assertIn('owner information', stderr.getvalue())
+                self.assertEqual(path.read_bytes(), b'previous backup')
+                spotify.list.assert_called_once_with('me/playlists', {'limit': 50})
+
+
 class PlaylistCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.entries = [

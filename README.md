@@ -39,8 +39,16 @@ the filename at the prompt. Without it, `.json` selects JSON and `.txt` or `.tsv
 selects tab-separated text; extensions are case-insensitive. A filename without
 an extension defaults to text. For any other extension, specify `--format`.
 
-By default, it exports your playlists. To also include your Liked Songs and saved
-albums, use:
+By default, it exports all playlists returned by Spotify: your own and followed
+playlists (`--dump=playlists`). To export only playlists you own, use:
+
+    python3 spotify-backup.py own.json --dump=own-playlists
+
+Ownership is determined by matching the playlist owner's Spotify ID to your
+account ID. Playlists owned by someone else are excluded from `own-playlists`,
+even if you collaborate on them. The filter applies before downloading contents.
+
+To also include your Liked Songs and saved albums with all playlists, use:
 
     python3 spotify-backup.py playlists.txt --dump=liked,playlists
 
@@ -49,6 +57,12 @@ To export only your Liked Songs and saved albums, use:
     python3 spotify-backup.py liked.txt --dump=liked
 
 `--dump=liked` always includes both songs and albums, in TXT and JSON output.
+To combine them with only your own playlists, use:
+
+    python3 spotify-backup.py own.json --dump=liked,own-playlists
+
+Both comma-separated selections accept either order, so `playlists,liked` and
+`own-playlists,liked` also work. Omitting `--dump` still selects all playlists.
 
 TXT exports quote fields containing tabs, line breaks, or double quotes so their
 contents are preserved. Import these files as tab-delimited text with double
@@ -67,7 +81,8 @@ entries with a `track` field, including null entries and other item metadata.
 Under Spotify's updated Development Mode restrictions, playlist contents are only
 available for playlists you own or collaborate on. If playlist contents are
 inaccessible or a download fails, the script reports the error and stops before
-creating or replacing the output file. See the
+creating or replacing the output file. `--dump=playlists` does not bypass these
+restrictions; use `--dump=own-playlists` to exclude playlists owned by others. See the
 [Spotify migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
 
 Browser login uses Authorization Code with PKCE. No client secret or additional
@@ -80,9 +95,9 @@ For a manual token, the required scopes depend on what you export:
 
 | Export | Required token scopes |
 | --- | --- |
-| Playlists (`--dump=playlists`, the default) | `playlist-read-private`, `playlist-read-collaborative` |
+| Playlists (`--dump=playlists`, the default, or `--dump=own-playlists`) | `playlist-read-private`, `playlist-read-collaborative` |
 | Liked Songs and saved albums (`--dump=liked`) | `user-library-read` |
-| Both (`--dump=liked,playlists` or `--dump=playlists,liked`) | All three scopes above |
+| Liked Songs, saved albums, and playlists (`--dump=liked,playlists` or `--dump=liked,own-playlists`, either order) | All three scopes above |
 
 For example, to use an existing token to export only liked songs and albums:
 

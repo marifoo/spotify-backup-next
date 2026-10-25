@@ -293,6 +293,7 @@ def load_playlist(spotify, playlist):
 
 
 def load_backup(spotify, dump):
+	dump = set(dump.split(','))
 	logging.info('Loading user info...')
 	me = spotify.get('me')
 	if not isinstance(me, dict) or not isinstance(me.get('id'), str) or not me['id']:
@@ -307,10 +308,20 @@ def load_backup(spotify, dump):
 		validate_entries(liked_tracks, 'track', 'Liked Songs')
 		validate_entries(liked_albums, 'album', 'Liked Albums')
 		playlists.append({'name': 'Liked Songs', 'tracks': liked_tracks})
-	if 'playlists' in dump:
+	if dump & {'playlists', 'own-playlists'}:
 		logging.info('Loading playlists...')
 		playlist_data = spotify.list('me/playlists', {'limit': 50})
 		logging.info('Found %s playlists', len(playlist_data))
+		if 'own-playlists' in dump:
+			owned = []
+			for playlist in playlist_data:
+				owner = playlist.get('owner') if isinstance(playlist, dict) else None
+				if not isinstance(owner, dict) or not isinstance(owner.get('id'), str) or not owner['id']:
+					raise ExportError('Cannot select own playlists: Spotify returned missing or invalid playlist owner information.')
+				if owner['id'] == me['id']:
+					owned.append(playlist)
+			playlist_data = owned
+			logging.info('Selected %s own playlists', len(playlist_data))
 		playlists.extend(load_playlist(spotify, playlist) for playlist in playlist_data)
 	return playlists, liked_albums
 
@@ -410,14 +421,29 @@ def write_backup(filename, output_format, playlists, liked_albums):
 
 def main():
 	# Parse arguments.
-	parser = argparse.ArgumentParser(description='Exports your Spotify playlists. By default, opens a browser window '
-	                                           + 'to authorize the Spotify Web API, but you can also manually specify'
-	                                           + ' an OAuth token with the --token option.')
+	parser = argparse.ArgumentParser(description='Exports your Spotify playlists, Liked Songs, and saved albums.\n'
+	                                           'By default, opens a browser window to authorize the Spotify Web API.\n'
+	                                           'You can also supply an OAuth token with --token.',
+	                                formatter_class=argparse.RawDescriptionHelpFormatter,
+	                                epilog='Dump selections (--dump):\n'
+	                                       '  playlists          All your playlists: own and followed (default).\n'
+	                                       '  own-playlists      Only playlists you own; excludes playlists owned\n'
+	                                       '                     by others, even if you collaborate on them.\n'
+	                                       '  liked              Both Liked Songs and saved albums.\n'
+	                                       '  liked,playlists    Liked Songs, saved albums, and all playlists.\n'
+	                                       '  liked,own-playlists\n'
+	                                       '                     Liked Songs, saved albums, and only your own playlists.\n'
+	                                       '  Either order is accepted for the comma-separated selections.\n\n'
+	                                       'Example: spotify-backup.py backup.json --dump=liked,own-playlists\n\n'
+	                                       'Spotify Development Mode only exposes playlist contents for playlists\n'
+	                                       'you own or collaborate on. Inaccessible contents stop the export.')
 	parser.add_argument('--token', metavar='OAUTH_TOKEN', help='use a Spotify OAuth token; playlists require '
 	                    'playlist-read-private and playlist-read-collaborative; liked songs and albums '
 	                    'require user-library-read')
-	parser.add_argument('--dump', default='playlists', choices=['liked,playlists', 'playlists,liked', 'playlists', 'liked'],
-	                    help='dump playlists, liked songs and albums (liked), or both (default: playlists)')
+	parser.add_argument('--dump', metavar='COLLECTIONS', default='playlists',
+	                    choices=['liked,playlists', 'playlists,liked', 'playlists', 'liked',
+	                             'own-playlists', 'liked,own-playlists', 'own-playlists,liked'],
+	                    help='choose collections to back up (default: playlists); see selections below')
 	parser.add_argument('--format', choices=['json', 'txt'], help='output format (default: infer from .json/.txt/.tsv; txt without an extension)')
 	parser.add_argument('--client-id', default=os.environ.get('SPOTIFY_CLIENT_ID'),
 	                    help='Spotify app client ID (default: SPOTIFY_CLIENT_ID or bundled app)')
