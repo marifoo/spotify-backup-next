@@ -176,11 +176,13 @@ class PlaylistCompatibilityTests(unittest.TestCase):
     def test_actual_http_denial_is_wrapped_with_playlist_context(self):
         error = urllib.error.HTTPError('https://api.spotify.com/v1/playlists/restricted/items', 403,
                                        'Forbidden', {}, None)
-        with patch.object(backup.urllib.request, 'urlopen', side_effect=error), patch.object(backup.time, 'sleep'):
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=error) as send, patch.object(backup.time, 'sleep') as sleep:
             with self.assertRaisesRegex(backup.ExportError, 'Restricted.*restricted.*HTTP Error 403'):
                 backup.load_playlist(backup.SpotifyAPI('token'), {
                     'name': 'Restricted', 'id': 'restricted',
                     'items': {'href': error.url, 'total': 2}})
+        send.assert_called_once()
+        sleep.assert_not_called()
 
     def test_cli_bad_later_pages_preserve_output(self):
         for output_format in ('txt', 'json'):

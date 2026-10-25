@@ -71,6 +71,13 @@ Browser login requests all three scopes automatically. Changing `--dump` does no
 add permissions to a manually supplied token; obtain a token with the required
 scopes if Spotify rejects a request for insufficient permissions.
 
+Permanent API errors stop immediately: for a 401, log in again or obtain a new
+manual token; for a 403, check scopes and playlist access; for a 404, check
+whether the playlist is still accessible. Connection failures, HTTP 408/429,
+and server errors are retried up to three attempts with 30-second network
+timeouts. Rate-limit waits of up to 60 seconds are honored; longer requested
+waits stop the export with instructions to retry later.
+
 The bundled Spotify app is used by default. If Spotify rejects that app or your
 account cannot access it, you can use your own app registration:
 

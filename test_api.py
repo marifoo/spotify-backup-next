@@ -1,5 +1,6 @@
 import io
 import copy
+import http.client
 import unittest
 from unittest.mock import call, patch
 import urllib.error
@@ -118,6 +119,57 @@ class RequestTests(unittest.TestCase):
                 backup.SpotifyAPI('token').get('me/tracks')
         self.assertEqual(send.call_count, 3)
         self.assertEqual(sleep.call_args_list, [call(2), call(2)])
+
+    def test_permanent_http_errors_fail_once_with_recovery_guidance(self):
+        for status, guidance in ((400, 'request failed'), (401, 'new --token'), (403, 'token scopes'), (404, 'playlist access')):
+            with self.subTest(status=status), patch.object(backup.urllib.request, 'urlopen', side_effect=self.http_error(status=status)) as send, patch.object(backup.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(backup.ExportError, guidance):
+                    backup.SpotifyAPI('token').get('me/tracks')
+                send.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_transient_http_and_protocol_failures_retry_within_budget(self):
+        for error in (self.http_error(status=408), self.http_error(status=500),
+                      http.client.IncompleteRead(b'partial', 20), http.client.RemoteDisconnected('closed')):
+            with self.subTest(error=type(error)), patch.object(backup.urllib.request, 'urlopen', side_effect=[error, io.BytesIO(b'{}')]) as send, patch.object(backup.time, 'sleep') as sleep:
+                self.assertEqual(backup.SpotifyAPI('token').get('me/tracks'), {})
+                self.assertEqual(send.call_count, 2)
+                sleep.assert_called_once_with(2)
+
+    def test_excessive_rate_limit_wait_stops_without_sleeping_or_overflow(self):
+        for retry_after in ('61', '99999999999999999999999999999999999'):
+            with self.subTest(retry_after=retry_after), patch.object(backup.urllib.request, 'urlopen', side_effect=self.http_error(headers={'Retry-After': retry_after})) as send, patch.object(backup.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(backup.ExportError, 'Retry later'):
+                    backup.SpotifyAPI('token').get('me/tracks')
+                send.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_malformed_json_is_controlled_without_retrying(self):
+        for body in (b'not json', b'\xff'):
+            with self.subTest(body=body), patch.object(backup.urllib.request, 'urlopen', return_value=io.BytesIO(body)) as send, patch.object(backup.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(backup.ExportError, 'invalid JSON'):
+                    backup.SpotifyAPI('token').get('me/tracks')
+                send.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_failure_logs_and_messages_do_not_expose_token_or_query_values(self):
+        token = 'sensitive-access-token'
+        errors = [urllib.error.URLError(token), self.http_error(status=401)]
+        for error in errors:
+            with self.subTest(error=type(error)), patch.object(backup.urllib.request, 'urlopen', side_effect=error), patch.object(backup.time, 'sleep'), self.assertLogs(level='INFO') as logs:
+                with self.assertRaises(backup.ExportError) as failed:
+                    backup.SpotifyAPI(token).get('me/tracks', {'sensitive': token})
+                output = str(failed.exception) + '\n'.join(logs.output)
+                self.assertNotIn(token, output)
+                self.assertNotIn('sensitive=', output)
+
+    def test_http_error_response_is_closed(self):
+        body = io.BytesIO(b'error details')
+        error = urllib.error.HTTPError('https://api.spotify.com/v1/me', 403, 'Forbidden', {}, body)
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaises(backup.ExportError):
+                backup.SpotifyAPI('token').get('me')
+        self.assertTrue(body.closed)
 
 
 if __name__ == '__main__':

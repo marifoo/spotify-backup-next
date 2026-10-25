@@ -118,10 +118,20 @@ class AuthenticationTests(unittest.TestCase):
             with self.subTest(body=body), patch.object(backup.urllib.request, 'urlopen', return_value=io.BytesIO(body)):
                 with self.assertRaises(API.AuthorizationError):
                     API._exchange_authorization_code('client', 'verifier', 'redirect', 'code')
-        for error in (urllib.error.URLError('offline'), TimeoutError(), urllib.error.HTTPError('url', 400, 'bad', {}, None)):
+        for error in (urllib.error.URLError('offline'), TimeoutError(), urllib.error.HTTPError('url', 400, 'bad', {}, None),
+                      http.client.IncompleteRead(b'partial', 20), http.client.RemoteDisconnected('closed')):
             with self.subTest(error=error), patch.object(backup.urllib.request, 'urlopen', side_effect=error):
                 with self.assertRaises(API.AuthorizationError):
                     API._exchange_authorization_code('client', 'verifier', 'redirect', 'code')
+
+    def test_truncated_token_response_is_closed_and_credentials_are_not_logged(self):
+        response = io.BytesIO(b'')
+        failure = http.client.IncompleteRead(b'sensitive-access-token', 20)
+        with patch.object(backup.urllib.request, 'urlopen', return_value=response), patch.object(response, 'read', side_effect=failure):
+            with self.assertRaises(API.AuthorizationError) as error:
+                API._exchange_authorization_code('client', 'verifier', 'redirect', 'sensitive-auth-code')
+        self.assertTrue(response.closed)
+        self.assertNotIn('sensitive', str(error.exception))
 
 
 if __name__ == '__main__':

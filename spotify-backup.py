@@ -51,31 +51,55 @@ class SpotifyAPI:
 	# Gets a resource from the Spotify API and returns the object.
 	def get(self, url, params=None, tries=3):
 		url = self._url(url, params)
+		# Log the endpoint without query values or exception text, which can
+		# contain credentials supplied by a server, proxy, or HTTP library.
+		resource = urllib.parse.urlsplit(url).path
+		if self._auth:
+			resource = resource.replace(self._auth, '[redacted]')
 	
 		# Try the sending off the request a specified number of times before giving up.
 		for attempt in range(tries):
+			delay = 2
 			try:
 				req = urllib.request.Request(url)
 				req.add_header('Authorization', 'Bearer ' + self._auth)
 				with urllib.request.urlopen(req, timeout=30) as res:
 					reader = codecs.getreader('utf-8')
 					return json.load(reader(res))
-			except Exception as err:
-				logging.info('Couldn\'t load URL: {} ({})'.format(url, err))
-				if attempt + 1 == tries:
-					raise ExportError('Could not load URL: {} ({})'.format(url, err)) from None
-				if attempt + 1 < tries:
-					delay = 2
-					if isinstance(err, urllib.error.HTTPError) and err.code == 429:
+			except urllib.error.HTTPError as err:
+				try:
+					status = err.code
+					retry = status in (408, 429) or 500 <= status < 600
+					guidance = {
+						401: 'Token expired or invalid. Run again to log in, or supply a new --token.',
+						403: 'Access denied. Check token scopes and playlist access; see README.md.',
+						404: 'Resource unavailable. Check playlist access or whether it was removed.',
+					}.get(status, 'Spotify request failed.')
+					message = 'HTTP Error {}: {}'.format(status, guidance)
+					if status == 429:
 						try:
 							retry_after = int(err.headers.get('Retry-After'))
 							if retry_after >= 0:
 								delay = retry_after
 						except (AttributeError, TypeError, ValueError):
 							pass
-					logging.info('Trying again in %s seconds...', delay)
-					time.sleep(delay)
-		raise ExportError('Could not load URL: {}'.format(url))
+						if delay > 60:
+							retry = False
+							message += ' Requested rate-limit wait exceeds 60 seconds. Retry later.'
+				finally:
+					err.close()
+			except (OSError, urllib.error.URLError, http.client.HTTPException):
+				retry = True
+				message = 'Network or HTTP connection failed. Check your connection and retry.'
+			except ValueError:
+				retry = False
+				message = 'Spotify returned invalid JSON or response encoding. Please retry.'
+			logging.warning('Could not load %s: %s', resource, message)
+			if not retry or attempt + 1 == tries:
+				raise ExportError('Could not load {}: {}'.format(resource, message)) from None
+			logging.info('Trying again in %s seconds...', delay)
+			time.sleep(delay)
+		raise ExportError('Could not load {}: no request attempts available.'.format(resource))
 	
 	# The Spotify API breaks long lists into multiple pages. This method automatically
 	# fetches all pages and joins them, returning in a single list of objects.
@@ -160,9 +184,11 @@ class SpotifyAPI:
 			with urllib.request.urlopen(req, timeout=30) as response:
 				result = json.load(response)
 		except urllib.error.HTTPError as err:
+			status = err.code
+			err.close()
 			raise SpotifyAPI.AuthorizationError(
-				'Could not complete Spotify login (HTTP {}). Retry, or see README.md for custom client ID setup.'.format(err.code)) from None
-		except (OSError, urllib.error.URLError, ValueError):
+				'Could not complete Spotify login (HTTP {}). Retry, or see README.md for custom client ID setup.'.format(status)) from None
+		except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError):
 			raise SpotifyAPI.AuthorizationError('Could not complete Spotify login. Check your connection and retry.') from None
 		if not isinstance(result, dict) or not isinstance(result.get('access_token'), str) or not result['access_token']:
 			raise SpotifyAPI.AuthorizationError('Spotify did not return an access token. Please retry login.')
