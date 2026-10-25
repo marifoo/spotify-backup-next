@@ -182,6 +182,43 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                     'name': 'Restricted', 'id': 'restricted',
                     'items': {'href': error.url, 'total': 2}})
 
+    def test_cli_bad_later_pages_preserve_output(self):
+        for output_format in ('txt', 'json'):
+            for existing in (False, True):
+                for later_page in ({'items': None, 'next': None}, {'items': [], 'next': 'https://['}, backup.ExportError('offline')):
+                    with self.subTest(format=output_format, existing=existing, page=later_page), tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / 'backup'
+                        if existing:
+                            path.write_bytes(b'previous backup')
+                        responses = [{'id': 'tester'}, {'items': [], 'next': 'https://api.spotify.com/v1/me/playlists?offset=50'}, later_page]
+                        with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test', '--format=' + output_format]), patch.object(backup.SpotifyAPI, 'get', side_effect=responses), patch.object(backup.sys, 'stderr', io.StringIO()):
+                            with self.assertRaises(SystemExit) as error:
+                                backup.main()
+                        self.assertEqual(error.exception.code, 1)
+                        self.assertEqual(path.read_bytes() if existing else path.exists(), b'previous backup' if existing else False)
+
+    def test_profile_display_name_is_optional_and_bad_profiles_fail_cleanly(self):
+        spotify = Mock()
+        spotify.get.return_value = {'id': 'tester', 'display_name': None}
+        spotify.list.return_value = []
+        self.assertEqual(backup.load_backup(spotify, 'playlists'), ([], []))
+        for profile in (None, {}, {'id': []}):
+            with self.subTest(profile=profile):
+                spotify.get.return_value = profile
+                with self.assertRaises(backup.ExportError):
+                    backup.load_backup(spotify, 'playlists')
+
+    def test_malformed_playlist_and_media_fail_cleanly(self):
+        spotify = Mock()
+        for playlist in (None, {}, {'name': []}, {'name': 'Test', 'items': []}):
+            with self.subTest(playlist=playlist), self.assertRaises(backup.ExportError):
+                backup.load_playlist(spotify, playlist)
+        for media in ([], 'bad', {'artists': [None]}, {'album': []}, {'name': []}, {'show': {'publisher': 1}}):
+            with self.subTest(media=media):
+                spotify.list.return_value = [{'track': media}]
+                with self.assertRaises(backup.ExportError):
+                    backup.load_playlist(spotify, {'name': 'Test', 'tracks': {'href': 'tracks'}})
+
 
 if __name__ == '__main__':
     unittest.main()

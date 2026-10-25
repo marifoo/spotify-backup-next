@@ -1,9 +1,62 @@
 import io
+import copy
 import unittest
 from unittest.mock import call, patch
 import urllib.error
 
 from test_auth import backup
+
+
+class PaginationTests(unittest.TestCase):
+    def test_malformed_pages_fail_with_context(self):
+        pages = [None, [], {}, {'items': None, 'next': None}, {'items': {}, 'next': None},
+                 {'items': [None], 'next': None}, {'items': [], 'next': []},
+                 {'items': [], 'next': ''}, {'items': []},
+                 *({'items': [], 'next': None, 'total': value} for value in (None, -1, True, '0'))]
+        for page in pages:
+            with self.subTest(page=page), patch.object(backup.SpotifyAPI, 'get', return_value=page):
+                with self.assertRaisesRegex(backup.ExportError, 'me/tracks'):
+                    backup.SpotifyAPI('token').list('me/tracks')
+
+    def test_pagination_cycles_are_bounded_including_reordered_query(self):
+        first = 'https://api.spotify.com/v1/me/tracks?limit=50&offset=0'
+        second = 'https://api.spotify.com/v1/me/tracks?offset=50&limit=50'
+        equivalent_first = 'https://api.spotify.com/v1/me/tracks?offset=0&limit=50'
+        for next_urls in ([first], [second, first], [equivalent_first]):
+            with self.subTest(urls=next_urls):
+                pages = [{'items': [], 'next': url} for url in next_urls]
+                with patch.object(backup.SpotifyAPI, 'get', side_effect=pages) as get:
+                    with self.assertRaisesRegex(backup.ExportError, 'repeated.*pagination'):
+                        backup.SpotifyAPI('token').list('me/tracks', {'limit': 50, 'offset': 0})
+                self.assertEqual(get.call_count, len(pages))
+
+    def test_slow_pagination_does_not_require_total_or_mutate_pages(self):
+        pages = [{'items': [{'track': None}], 'next': 'https://api.spotify.com/v1/me/tracks?offset=1'},
+                 {'items': [{'track': {}}], 'next': None}]
+        original = copy.deepcopy(pages)
+        with patch.object(backup.SpotifyAPI, 'get', side_effect=pages), patch.object(backup.time, 'monotonic', side_effect=[0, 16]), patch.object(backup.logging, 'info') as info:
+            self.assertEqual(backup.SpotifyAPI('token').list('me/tracks'), [{'track': None}, {'track': {}}])
+        info.assert_called_once_with('Loaded %s/%s items', 1, 'unknown')
+        self.assertEqual(pages, original)
+
+    def test_inconsistent_totals_fail_instead_of_returning_partial_data(self):
+        next_url = 'https://api.spotify.com/v1/me/tracks?offset=1'
+        scenarios = [
+            [{'items': [], 'next': None, 'total': 1}],
+            [{'items': [{}], 'next': None, 'total': 0}],
+            [{'items': [{}], 'next': next_url, 'total': 2}, {'items': [{}], 'next': None, 'total': 3}],
+        ]
+        for pages in scenarios:
+            with self.subTest(pages=pages), patch.object(backup.SpotifyAPI, 'get', side_effect=pages):
+                with self.assertRaises(backup.ExportError):
+                    backup.SpotifyAPI('token').list('me/tracks')
+
+    def test_rejects_resource_urls_outside_api(self):
+        for url in ('https://example.com/page', '//example.com/page', 'https://[', None):
+            with self.subTest(url=url), patch.object(backup.urllib.request, 'urlopen') as send:
+                with self.assertRaises(backup.ExportError):
+                    backup.SpotifyAPI('token').get(url)
+                send.assert_not_called()
 
 
 class RequestTests(unittest.TestCase):

@@ -32,13 +32,25 @@ class SpotifyAPI:
 	def __init__(self, auth):
 		self._auth = auth
 	
-	# Gets a resource from the Spotify API and returns the object.
-	def get(self, url, params={}, tries=3):
-		# Construct the correct URL.
+	@staticmethod
+	def _url(url, params=None):
+		if not isinstance(url, str) or not url:
+			raise ExportError('Spotify returned an invalid resource URL.')
+		try:
+			parts = urllib.parse.urlsplit(url)
+		except ValueError:
+			raise ExportError('Spotify returned a malformed resource URL.') from None
 		if not url.startswith('https://api.spotify.com/v1/'):
+			if parts.scheme or url.startswith('//'):
+				raise ExportError('Spotify returned a resource URL outside its API.')
 			url = 'https://api.spotify.com/v1/' + url
 		if params:
 			url += ('&' if '?' in url else '?') + urllib.parse.urlencode(params)
+		return url
+
+	# Gets a resource from the Spotify API and returns the object.
+	def get(self, url, params=None, tries=3):
+		url = self._url(url, params)
 	
 		# Try the sending off the request a specified number of times before giving up.
 		for attempt in range(tries):
@@ -67,19 +79,43 @@ class SpotifyAPI:
 	
 	# The Spotify API breaks long lists into multiple pages. This method automatically
 	# fetches all pages and joins them, returning in a single list of objects.
-	def list(self, url, params={}):
-		last_log_time = time.time()
-		response = self.get(url, params)
-		items = response['items']
-
-		while response['next']:
-			if time.time() > last_log_time + 15:
-				last_log_time = time.time()
-				logging.info(f"Loaded {len(items)}/{response['total']} items")
-
-			response = self.get(response['next'])
-			items += response['items']
-		return items
+	def list(self, url, params=None):
+		resource = url
+		last_log_time = time.monotonic()
+		items, visited, expected_total = [], set(), None
+		while True:
+			request_url = self._url(url, params)
+			parts = urllib.parse.urlsplit(request_url)
+			# Query ordering must not disguise a repeated page.
+			page_key = (parts.path, tuple(sorted(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))))
+			if page_key in visited:
+				raise ExportError('Cannot export {}: Spotify repeated a pagination URL. Please retry.'.format(resource))
+			visited.add(page_key)
+			response = self.get(url, params) if params else self.get(url)
+			if (not isinstance(response, dict) or not isinstance(response.get('items'), list)
+			        or any(not isinstance(item, dict) for item in response['items'])
+			        or 'next' not in response
+			        or (response['next'] is not None and (not isinstance(response['next'], str) or not response['next']))):
+				raise ExportError('Cannot export {}: Spotify returned a malformed page.'.format(resource))
+			if 'total' in response:
+				total = response['total']
+				if type(total) is not int or total < 0:
+					raise ExportError('Cannot export {}: Spotify returned an invalid item count.'.format(resource))
+				if expected_total is not None and total != expected_total:
+					raise ExportError('Cannot export {}: item count changed during download. Please retry.'.format(resource))
+				expected_total = total
+			items.extend(response['items'])
+			if expected_total is not None and len(items) > expected_total:
+				raise ExportError('Cannot export {}: downloaded item count exceeds Spotify total. Please retry.'.format(resource))
+			if response['next'] is None:
+				if expected_total is not None and len(items) != expected_total:
+					raise ExportError('Cannot export {}: downloaded {} of {} items. Please retry.'.format(resource, len(items), expected_total))
+				return items
+			now = time.monotonic()
+			if now > last_log_time + 15:
+				last_log_time = now
+				logging.info('Loaded %s/%s items', len(items), expected_total if expected_total is not None else 'unknown')
+			url, params = response['next'], None
 	
 	@staticmethod
 	def authorize(client_id, scope):
@@ -180,11 +216,34 @@ def artist_names(artists):
 	return ', '.join(artist.get('name') or 'Unknown Artist' for artist in (artists or [])) or 'Unknown Artist'
 
 
+def validate_entries(entries, field, label):
+	for entry in entries:
+		media = entry.get(field) if isinstance(entry, dict) else False
+		if media is None:
+			continue
+		objects = [media]
+		if isinstance(media, dict):
+			objects.extend(media[key] for key in ('album', 'show') if media.get(key) is not None)
+		for obj in objects:
+			if not isinstance(obj, dict):
+				raise ExportError('Spotify returned malformed media in {}.'.format(label))
+			for key in ('name', 'uri', 'type', 'release_date', 'publisher'):
+				if obj.get(key) is not None and not isinstance(obj[key], str):
+					raise ExportError('Spotify returned malformed {} in {}.'.format(key, label))
+			artists = obj.get('artists')
+			if artists is not None and (not isinstance(artists, list) or any(
+			        not isinstance(artist, dict) or (artist.get('name') is not None and not isinstance(artist['name'], str))
+			        for artist in artists)):
+				raise ExportError('Spotify returned malformed artists in {}.'.format(label))
+
+
 def load_playlist(spotify, playlist):
+	if not isinstance(playlist, dict) or not isinstance(playlist.get('name'), str):
+		raise ExportError('Spotify returned malformed playlist metadata.')
 	label = '"{}" ({})'.format(playlist['name'], playlist.get('id', 'unknown ID'))
 	# Both fields can occur during Spotify's migration; prefer the current endpoint.
 	collection = playlist.get('items') or playlist.get('tracks')
-	if not collection or not collection.get('href'):
+	if not isinstance(collection, dict) or not isinstance(collection.get('href'), str) or not collection['href']:
 		raise ExportError('Cannot export playlist {}: Spotify did not expose its contents. '
 		                  'Development Mode apps may only read playlists you own or collaborate on.'.format(label))
 	logging.info('Loading playlist: %s (%s items)', label, collection.get('total', 'unknown'))
@@ -197,23 +256,30 @@ def load_playlist(spotify, playlist):
 	result.pop('items', None)
 	result['tracks'] = []
 	for entry in entries:
+		if not isinstance(entry, dict):
+			raise ExportError('Cannot export playlist {}: Spotify returned a malformed entry.'.format(label))
 		entry = dict(entry)
 		if 'item' in entry:
 			entry['track'] = entry.pop('item')
 		result['tracks'].append(entry)
+	validate_entries(result['tracks'], 'track', label)
 	return result
 
 
 def load_backup(spotify, dump):
 	logging.info('Loading user info...')
 	me = spotify.get('me')
-	logging.info('Logged in as {display_name} ({id})'.format(**me))
+	if not isinstance(me, dict) or not isinstance(me.get('id'), str) or not me['id']:
+		raise ExportError('Spotify returned malformed user information.')
+	logging.info('Logged in as %s (%s)', me.get('display_name') or me['id'], me['id'])
 	playlists = []
 	liked_albums = []
 	if 'liked' in dump:
 		logging.info('Loading liked albums and songs...')
 		liked_tracks = spotify.list('me/tracks', {'limit': 50})
 		liked_albums = spotify.list('me/albums', {'limit': 50})
+		validate_entries(liked_tracks, 'track', 'Liked Songs')
+		validate_entries(liked_albums, 'album', 'Liked Albums')
 		playlists.append({'name': 'Liked Songs', 'tracks': liked_tracks})
 	if 'playlists' in dump:
 		logging.info('Loading playlists...')
