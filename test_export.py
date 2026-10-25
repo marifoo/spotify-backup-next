@@ -1,11 +1,46 @@
 import copy
 import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from test_auth import backup
 
 
 class TextExportTests(unittest.TestCase):
+    def test_cli_writes_single_crlf_separators(self):
+        spotify = Mock()
+        spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester'}
+        spotify.list.side_effect = [
+            [{'track': {'name': 'Song', 'artists': [{'name': 'Singer'}],
+                        'album': {'name': 'Album'}, 'uri': 'spotify:track:1'}}],
+            [{'album': {'name': 'Saved', 'artists': [{'name': 'Other'}], 'uri': 'spotify:album:2'}}],
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.txt'
+            with patch.object(backup.sys, 'argv', ['spotify-backup.py', str(path), '--token=test', '--dump=liked']), patch.object(backup, 'SpotifyAPI', return_value=spotify):
+                backup.main()
+            self.assertEqual(path.read_bytes(), (
+                b'Playlists: \r\n\r\nLiked Songs\r\n'
+                b'Song\tSinger\tAlbum\tspotify:track:1\t\r\n\r\n'
+                b'Liked Albums: \r\n\r\nSaved\tOther\t-\tspotify:album:2\t\r\n'
+            ))
+
+    def test_json_file_keeps_original_structure(self):
+        spotify = Mock()
+        spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester'}
+        tracks = [{'track': {'name': 'Song'}}]
+        albums = [{'album': {'name': 'Saved'}}]
+        spotify.list.side_effect = [tracks, albums]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['spotify-backup.py', str(path), '--token=test', '--dump=liked', '--format=json']), patch.object(backup, 'SpotifyAPI', return_value=spotify):
+                backup.main()
+            self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
+                             {'playlists': [{'name': 'Liked Songs', 'tracks': tracks}], 'albums': albums})
+
     def render(self, tracks, albums=None):
         output = io.StringIO()
         playlists = [{'name': 'Test', 'tracks': tracks}]

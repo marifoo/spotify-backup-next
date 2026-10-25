@@ -256,7 +256,8 @@ def main():
 	
 	# Write the file.
 	logging.info('Writing files...')
-	with open(args.file, 'w', encoding='utf-8') as f:
+	# TXT writes explicit CRLF separators; avoid translating them again on Windows.
+	with open(args.file, 'w', encoding='utf-8', newline='') as f:
 		# JSON file.
 		if args.format == 'json':
 			json.dump({
