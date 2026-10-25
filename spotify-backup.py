@@ -159,6 +159,44 @@ class SpotifyAPI:
 			pass
 
 
+def artist_names(artists):
+	return ', '.join(artist.get('name') or 'Unknown Artist' for artist in (artists or [])) or 'Unknown Artist'
+
+
+def write_txt(f, playlists, liked_albums):
+	f.write('Playlists: \r\n\r\n')
+	for playlist in playlists:
+		f.write(playlist['name'] + '\r\n')
+		for entry in playlist['tracks']:
+			track = entry.get('track')
+			# Spotify can return null for unavailable or removed items.
+			if track is None:
+				continue
+			if track.get('type') == 'episode':
+				show = track.get('show') or {}
+				artists = show.get('publisher') or 'Unknown Artist'
+				album = show.get('name') or 'Unknown Show'
+				release_date = track.get('release_date') or ''
+			else:
+				metadata = track.get('album') or {}
+				artists = artist_names(track.get('artists'))
+				album = metadata.get('name') or 'Unknown Album'
+				release_date = metadata.get('release_date') or ''
+			f.write('{name}\t{artists}\t{album}\t{uri}\t{release_date}\r\n'.format(
+				name=track.get('name') or 'Unknown Track', artists=artists, album=album,
+				uri=track.get('uri') or '', release_date=release_date))
+		f.write('\r\n')
+	if liked_albums:
+		f.write('Liked Albums: \r\n\r\n')
+		for entry in liked_albums:
+			album = entry.get('album')
+			if album is None:
+				continue
+			f.write('{name}\t{artists}\t-\t{uri}\t{release_date}\r\n'.format(
+				name=album.get('name') or 'Unknown Album', artists=artist_names(album.get('artists')),
+				uri=album.get('uri') or '', release_date=album.get('release_date') or ''))
+
+
 def main():
 	# Parse arguments.
 	parser = argparse.ArgumentParser(description='Exports your Spotify playlists. By default, opens a browser window '
@@ -228,30 +266,7 @@ def main():
 		
 		# Tab-separated file.
 		else:
-			f.write('Playlists: \r\n\r\n')
-			for playlist in playlists:
-				f.write(playlist['name'] + '\r\n')
-				for track in playlist['tracks']:
-					if track['track'] is None:
-						continue
-					f.write('{name}\t{artists}\t{album}\t{uri}\t{release_date}\r\n'.format(
-						uri=track['track']['uri'],
-						name=track['track']['name'],
-						artists=', '.join([artist['name'] for artist in track['track']['artists']]),
-						album=track['track']['album']['name'],
-						release_date=track['track']['album']['release_date']
-					))
-				f.write('\r\n')
-			if len(liked_albums) > 0:
-				f.write('Liked Albums: \r\n\r\n')
-				for album in liked_albums:
-					uri = album['album']['uri']
-					name = album['album']['name']
-					artists = ', '.join([artist['name'] for artist in album['album']['artists']])
-					release_date = album['album']['release_date']
-					album = f'{artists} - {name}'
-
-					f.write(f'{name}\t{artists}\t-\t{uri}\t{release_date}\r\n')
+			write_txt(f, playlists, liked_albums)
 
 	logging.info('Wrote file: ' + args.file)
 
