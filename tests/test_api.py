@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import call, patch
 import urllib.error
 
-from test_auth import backup
+from tests.test_auth import backup
 
 
 class PaginationTests(unittest.TestCase):

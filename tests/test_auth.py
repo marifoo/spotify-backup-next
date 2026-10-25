@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 
 
-spec = importlib.util.spec_from_file_location('spotify_backup', Path(__file__).with_name('spotify-backup.py'))
+spec = importlib.util.spec_from_file_location('spotify_backup', Path(__file__).resolve().parent.parent / 'spotify-backup.py')
 backup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(backup)
 API = backup.SpotifyAPI

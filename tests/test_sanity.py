@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from test_auth import backup
+from tests.test_auth import backup
 
 
 class SanityCheckTests(unittest.TestCase):

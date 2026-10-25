@@ -83,7 +83,7 @@ If the bundled Spotify app is unavailable, create an app in the
 `SPOTIFY_CLIENT_ID` (`--client-id` takes precedence). Check Spotify's
 [app access requirements](https://developer.spotify.com/documentation/web-api/concepts/quota-modes).
 
-Run offline tests from the repository folder; no Spotify credentials are needed:
+The offline tests are in `tests/`. Run them from the repository folder; no Spotify credentials are needed:
 
 ```sh
 python3 -m unittest -v

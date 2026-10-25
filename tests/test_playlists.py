@@ -8,7 +8,7 @@ from unittest.mock import Mock, call, patch
 import urllib.error
 import urllib.parse
 
-from test_auth import backup
+from tests.test_auth import backup
 
 
 class PlaylistSelectionTests(unittest.TestCase):
