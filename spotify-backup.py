@@ -106,6 +106,7 @@ class SpotifyAPI:
 	# fetches all pages and joins them, returning in a single list of objects.
 	def list(self, url, params=None):
 		resource = url
+		playlist_listing = urllib.parse.urlsplit(self._url(url)).path == '/v1/me/playlists'
 		last_log_time = time.monotonic()
 		items, visited, expected_total = [], set(), None
 		while True:
@@ -134,7 +135,14 @@ class SpotifyAPI:
 				raise ExportError('Cannot export {}: downloaded item count exceeds Spotify total. Please retry.'.format(resource))
 			if response['next'] is None:
 				if expected_total is not None and len(items) != expected_total:
-					raise ExportError('Cannot export {}: downloaded {} of {} items. Please retry.'.format(resource, len(items), expected_total))
+					# The playlist index can count entries Spotify does not expose.
+					# Only tolerate a shortfall after following every next link;
+					# media collections still require an exact count.
+					if not playlist_listing:
+						raise ExportError('Cannot export {}: downloaded {} of {} items. Please retry.'.format(resource, len(items), expected_total))
+					logging.warning('Spotify returned %s playlists but reported %s after all pages were loaded. '
+					                'Continuing with the returned playlists; some entries may not be exposed by Spotify.',
+					                len(items), expected_total)
 				return items
 			now = time.monotonic()
 			if now > last_log_time + 15:

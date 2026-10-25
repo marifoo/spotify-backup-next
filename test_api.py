@@ -9,6 +9,35 @@ from test_auth import backup
 
 
 class PaginationTests(unittest.TestCase):
+    def test_playlist_listing_warns_when_all_pages_return_fewer_than_total(self):
+        playlists = [{'id': str(i)} for i in range(277)]
+        # Spotify may switch to a user-specific URL in its next links.
+        next_urls = ['https://api.spotify.com/v1/users/tester/playlists?offset=' + str(offset)
+                     for offset in range(50, 300, 50)]
+        pages = [{'items': playlists[offset:offset + 50], 'total': 278,
+                  'next': next_urls[offset // 50] if offset < 250 else None}
+                 for offset in range(0, 300, 50)]
+        for resource in ('me/playlists', 'https://api.spotify.com/v1/me/playlists?offset=0'):
+            with self.subTest(resource=resource), patch.object(backup.SpotifyAPI, 'get', side_effect=pages) as get:
+                with self.assertLogs(level='WARNING') as logs:
+                    result = backup.SpotifyAPI('token').list(resource, {'limit': 50})
+                self.assertEqual(result, playlists)
+                self.assertEqual(get.call_args_list, [call(resource, {'limit': 50})] + [call(url) for url in next_urls])
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn('277', logs.output[0])
+                self.assertIn('278', logs.output[0])
+
+    def test_playlist_listing_still_rejects_changed_or_exceeded_totals(self):
+        scenarios = [
+            [{'items': [{}], 'total': 0, 'next': None}],
+            [{'items': [{}], 'total': 2, 'next': 'me/playlists?offset=1'},
+             {'items': [{}], 'total': 3, 'next': None}],
+        ]
+        for pages in scenarios:
+            with self.subTest(pages=pages), patch.object(backup.SpotifyAPI, 'get', side_effect=pages):
+                with self.assertRaises(backup.ExportError):
+                    backup.SpotifyAPI('token').list('me/playlists')
+
     def test_malformed_pages_fail_with_context(self):
         pages = [None, [], {}, {'items': None, 'next': None}, {'items': {}, 'next': None},
                  {'items': [None], 'next': None}, {'items': [], 'next': []},
@@ -48,9 +77,10 @@ class PaginationTests(unittest.TestCase):
             [{'items': [{}], 'next': next_url, 'total': 2}, {'items': [{}], 'next': None, 'total': 3}],
         ]
         for pages in scenarios:
-            with self.subTest(pages=pages), patch.object(backup.SpotifyAPI, 'get', side_effect=pages):
-                with self.assertRaises(backup.ExportError):
-                    backup.SpotifyAPI('token').list('me/tracks')
+            for resource in ('me/tracks', 'me/albums', 'playlists/p/tracks', 'playlists/p/items'):
+                with self.subTest(pages=pages, resource=resource), patch.object(backup.SpotifyAPI, 'get', side_effect=pages):
+                    with self.assertRaises(backup.ExportError):
+                        backup.SpotifyAPI('token').list(resource)
 
     def test_rejects_resource_urls_outside_api(self):
         for url in ('https://example.com/page', '//example.com/page', 'https://[', None):

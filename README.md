@@ -40,7 +40,11 @@ selects tab-separated text; extensions are case-insensitive. A filename without
 an extension defaults to text. For any other extension, specify `--format`.
 
 By default, it exports all playlists returned by Spotify: your own and followed
-playlists (`--dump=playlists`). To export only playlists you own, use:
+playlists (`--dump=playlists`). Spotify can report a playlist total larger than
+the number it actually returns. After following all pages, the script warns and
+continues with the returned playlists in this case. Item counts for playlist
+contents, Liked Songs, and saved albums are still checked strictly.
+To export only playlists you own, use:
 
     python3 spotify-backup.py own.json --dump=own-playlists
 
