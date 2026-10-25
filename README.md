@@ -33,6 +33,12 @@ TXT exports quote fields containing tabs, line breaks, or double quotes so their
 contents are preserved. Import these files as tab-delimited text with double
 quotes as the text qualifier in your spreadsheet application.
 
+After saving a TXT export, the script reports exported and unavailable entry
+counts for each playlist and for any saved album entries. Unavailable entries
+are omitted from TXT and produce a warning. JSON retains null entries and the
+metadata Spotify returns; it cannot recover missing information about an
+unavailable song or album.
+
 Playlist exports automatically support Spotify's legacy and updated API response
 formats; no CLI switch is needed. JSON keeps the existing `playlists[].tracks[]`
 entries with a `track` field, including null entries and other item metadata.

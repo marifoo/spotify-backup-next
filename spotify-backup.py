@@ -291,14 +291,17 @@ def load_backup(spotify, dump):
 
 def write_txt(f, playlists, liked_albums):
 	writer = csv.writer(f, delimiter='\t', lineterminator='\r\n')
+	summaries = []
 	writer.writerow(['Playlists: '])
 	writer.writerow([])
 	for playlist in playlists:
+		exported, unavailable = 0, 0
 		writer.writerow([playlist['name']])
 		for entry in playlist['tracks']:
 			track = entry.get('track')
 			# Spotify can return null for unavailable or removed items.
 			if track is None:
+				unavailable += 1
 				continue
 			if track.get('type') == 'episode':
 				show = track.get('show') or {}
@@ -312,16 +315,23 @@ def write_txt(f, playlists, liked_albums):
 				release_date = metadata.get('release_date') or ''
 			writer.writerow([track.get('name') or 'Unknown Track', artists, album,
 			                 track.get('uri') or '', release_date])
+			exported += 1
 		writer.writerow([])
+		summaries.append((playlist['name'], exported, unavailable))
 	if liked_albums:
+		exported, unavailable = 0, 0
 		writer.writerow(['Liked Albums: '])
 		writer.writerow([])
 		for entry in liked_albums:
 			album = entry.get('album')
 			if album is None:
+				unavailable += 1
 				continue
 			writer.writerow([album.get('name') or 'Unknown Album', artist_names(album.get('artists')),
 			                 '-', album.get('uri') or '', album.get('release_date') or ''])
+			exported += 1
+		summaries.append(('Liked Albums', exported, unavailable))
+	return summaries
 
 
 def check_output_path(filename):
@@ -346,6 +356,7 @@ def check_output_path(filename):
 def write_backup(filename, output_format, playlists, liked_albums):
 	filename = os.path.abspath(filename)
 	temporary = None
+	summaries = None
 	try:
 		# Keep the temporary file on the same filesystem for atomic replacement.
 		with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='',
@@ -355,7 +366,7 @@ def write_backup(filename, output_format, playlists, liked_albums):
 			if output_format == 'json':
 				json.dump({'playlists': playlists, 'albums': liked_albums}, f)
 			else:
-				write_txt(f, playlists, liked_albums)
+				summaries = write_txt(f, playlists, liked_albums)
 			f.flush()
 			os.fsync(f.fileno())
 		# Close first: Windows cannot replace a file while it is open.
@@ -368,6 +379,7 @@ def write_backup(filename, output_format, playlists, liked_albums):
 				pass
 			except OSError:
 				logging.warning('Could not remove temporary backup: %s', temporary)
+	return summaries
 
 
 def main():
@@ -425,11 +437,15 @@ def main():
 	# Write the file.
 	logging.info('Writing files...')
 	try:
-		write_backup(args.file, args.format, playlists, liked_albums)
+		summaries = write_backup(args.file, args.format, playlists, liked_albums)
 	except (OSError, ValueError, TypeError, csv.Error) as err:
 		parser.exit(1, 'Could not write backup to {!r}: {}. Check free disk space and permissions.\n'.format(args.file, err))
 	except KeyboardInterrupt:
 		parser.exit(130, 'Export cancelled while writing the backup.\n')
+	for label, exported, unavailable in summaries or []:
+		logging.info('TXT collection %r: exported %s entries, unavailable %s', label, exported, unavailable)
+		if unavailable:
+			logging.warning('TXT omitted %s unavailable entries from %r; use --format=json to preserve null entries and available metadata.', unavailable, label)
 
 	logging.info('Wrote file: ' + args.file)
 

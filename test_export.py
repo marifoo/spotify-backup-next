@@ -11,6 +11,52 @@ from unittest.mock import Mock, patch
 from test_auth import backup
 
 
+class ExportSummaryTests(unittest.TestCase):
+    def test_text_summary_counts_tracks_and_saved_albums(self):
+        playlists = [{'name': 'Mixed', 'tracks': [{'track': {}}, {'track': None}, {}]},
+                     {'name': 'Empty', 'tracks': []}]
+        albums = [{'album': {}}, {'album': None}]
+        original = copy.deepcopy((playlists, albums))
+        summaries = backup.write_txt(io.StringIO(), playlists, albums)
+        self.assertEqual(summaries, [('Mixed', 1, 2), ('Empty', 0, 0), ('Liked Albums', 1, 1)])
+        self.assertEqual((playlists, albums), original)
+
+    def test_cli_distinguishes_unavailable_collections_from_empty(self):
+        playlists = [{'name': 'Unavailable', 'tracks': [{'track': None}, {'track': None}]},
+                     {'name': 'Empty', 'tracks': []}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.txt'
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value=(playlists, [])), self.assertLogs(level='INFO') as logs:
+                backup.main()
+            messages = '\n'.join(logs.output)
+            self.assertIn("'Unavailable': exported 0 entries, unavailable 2", messages)
+            self.assertIn("'Empty': exported 0 entries, unavailable 0", messages)
+            warnings = [record.getMessage() for record in logs.records if record.levelname == 'WARNING']
+            self.assertEqual(len(warnings), 1)
+            self.assertIn('omitted 2', warnings[0])
+            self.assertIn('--format=json', warnings[0])
+            self.assertTrue(path.exists())
+
+    def test_json_preserves_unavailable_entries_without_text_omission_warning(self):
+        playlists = [{'name': 'Unavailable', 'tracks': [{'track': None}]}]
+        albums = [{'album': None}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value=(playlists, albums)), self.assertLogs(level='INFO') as logs:
+                backup.main()
+            self.assertEqual(json.loads(path.read_text()), {'playlists': playlists, 'albums': albums})
+            self.assertFalse(any('omitted' in record.getMessage() for record in logs.records))
+
+    def test_failed_save_does_not_report_entries_as_exported(self):
+        playlists = [{'name': 'Unavailable', 'tracks': [{'track': None}]}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.txt'
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value=(playlists, [])), patch.object(backup.os, 'replace', side_effect=OSError('disk full')), patch.object(backup.sys, 'stderr', io.StringIO()), self.assertLogs(level='INFO') as logs:
+                with self.assertRaises(SystemExit):
+                    backup.main()
+            self.assertFalse(any('TXT collection' in record.getMessage() or 'TXT omitted' in record.getMessage() for record in logs.records))
+
+
 class OutputPathTests(unittest.TestCase):
     def assert_preflight_failure(self, path):
         with patch.object(backup.sys, 'argv', ['script', str(path), '--format=txt']), patch.object(backup.SpotifyAPI, 'authorize') as authorize, patch.object(backup, 'load_backup') as load, patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
