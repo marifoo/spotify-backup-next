@@ -3,7 +3,7 @@
 Back up accessible Spotify playlists, Liked Songs, and saved albums as JSON or
 tab-separated text. Requires **Python 3.11+**, with no third-party packages.
 
-Download [spotify-backup.py](https://raw.githubusercontent.com/marifoo/spotify-backup-next/master/spotify-backup.py)
+Download [spotify-backup.py](https://raw.githubusercontent.com/marifoo/spotify-backup-next/main/spotify-backup.py)
 or use your checkout. Open a terminal in the script's folder and run:
 
 ```powershell
