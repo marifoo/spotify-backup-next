@@ -120,4 +120,8 @@ Tests use Python's standard library, mocked API responses, and a local callback 
 On Windows, run `py -3 -m unittest -v`. Run tests from the repository folder;
 they require no Spotify credentials and make no requests to Spotify.
 
+The [CI workflow](.github/workflows/tests.yml) runs CLI help and the full test
+suite on Windows and Linux with CPython 3.11, 3.12, 3.13, 3.14, and 3.15 for
+every push and pull request. It can also be started manually in GitHub Actions.
+
 Playlist folders don't show up in the API, sadly.
