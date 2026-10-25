@@ -1,4 +1,4 @@
-# spotify-backup
+# spotify-backup-next
 
 Back up accessible Spotify playlists, Liked Songs, and saved albums as JSON or
 tab-separated text. Requires **Python 3.11+**, with no third-party packages.
