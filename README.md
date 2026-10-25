@@ -82,6 +82,12 @@ are omitted from TXT and produce a warning. JSON retains null entries and the
 metadata Spotify returns; it cannot recover missing information about an
 unavailable song or album.
 
+After saving, a basic sanity check reads the file back and checks its structure,
+then looks up to three randomly selected, distinct song IDs from the saved file
+on Spotify. Local files, episodes, and unavailable entries are not sampled. If
+there are no eligible songs, only the file is checked. Success prints
+`Sanity check passed.` A failed check warns and keeps the saved backup.
+
 Playlist exports automatically support Spotify's legacy and updated API response
 formats; no CLI switch is needed. JSON keeps the existing `playlists[].tracks[]`
 entries with a `track` field, including null entries and other item metadata.

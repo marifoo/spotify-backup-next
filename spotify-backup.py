@@ -10,6 +10,7 @@ import http.server
 import json
 import logging
 import os
+import random
 import secrets
 import sys
 import tempfile
@@ -455,6 +456,51 @@ def write_backup(filename, output_format, playlists, liked_albums):
 	return summaries
 
 
+def sanity_check(filename, output_format, spotify):
+	if os.path.getsize(filename) == 0:
+		raise ExportError('The saved file is empty')
+	track_ids = set()
+	with open(filename, encoding='utf-8', newline='') as f:
+		if output_format == 'json':
+			data = json.load(f)
+			if (not isinstance(data, dict) or not isinstance(data.get('playlists'), list)
+			        or not isinstance(data.get('albums'), list)
+			        or any(not isinstance(entry, dict) for entry in data['albums'])):
+				raise ExportError('The saved JSON has an invalid backup structure')
+			uris = []
+			for playlist in data['playlists']:
+				if (not isinstance(playlist, dict) or not isinstance(playlist.get('name'), str)
+				        or not isinstance(playlist.get('tracks'), list)
+				        or any(not isinstance(entry, dict) for entry in playlist['tracks'])):
+					raise ExportError('The saved JSON has an invalid playlist structure')
+				validate_entries(playlist['tracks'], 'track', 'saved backup')
+				uris.extend((entry.get('track') or {}).get('uri', '') for entry in playlist['tracks'])
+			validate_entries(data['albums'], 'album', 'saved backup')
+		else:
+			rows = csv.reader(f, delimiter='\t', strict=True)
+			if next(rows, None) != ['Playlists: ']:
+				raise ExportError('The saved text has an invalid backup header')
+			uris = []
+			for row in rows:
+				if len(row) not in (0, 1, 5):
+					raise ExportError('The saved text has an invalid row structure')
+				if len(row) == 5:
+					uris.append(row[3])
+	for uri in uris:
+		if isinstance(uri, str) and uri.startswith('spotify:track:'):
+			track_id = uri[len('spotify:track:'):]
+			if track_id.isascii() and track_id.isalnum():
+				track_ids.add(track_id)
+	for track_id in random.sample(sorted(track_ids), min(3, len(track_ids))):
+		track = spotify.get('tracks/' + track_id, tries=1)
+		# A market-specific replacement can still identify the original song.
+		if not isinstance(track, dict):
+			raise ExportError('Spotify did not return a sampled song')
+		linked_from = track.get('linked_from')
+		if track.get('id') != track_id and (not isinstance(linked_from, dict) or linked_from.get('id') != track_id):
+			raise ExportError('Spotify did not confirm a sampled song ID')
+
+
 def main():
 	# Parse arguments.
 	parser = argparse.ArgumentParser(description='Exports your Spotify playlists, Liked Songs, and saved albums.\n'
@@ -536,6 +582,12 @@ def main():
 			logging.warning('TXT omitted %s unavailable entries from %r; use --format=json to preserve null entries and available metadata.', unavailable, label)
 
 	logging.info('Wrote file: ' + args.file)
+	try:
+		sanity_check(args.file, args.format, spotify)
+	except (ExportError, OSError, ValueError, TypeError, csv.Error) as err:
+		logging.warning('Sanity check failed: %s. The saved backup has been kept.', err)
+	else:
+		logging.info('Sanity check passed.')
 
 if __name__ == '__main__':
 	main()

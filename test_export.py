@@ -261,7 +261,7 @@ class TextExportTests(unittest.TestCase):
 
     def test_cli_writes_single_crlf_separators(self):
         spotify = Mock()
-        spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester'}
+        spotify.get.side_effect = [{'display_name': 'Tester', 'id': 'tester'}, {'id': '1'}]
         spotify.list.side_effect = [
             [{'track': {'name': 'Song', 'artists': [{'name': 'Singer'}],
                         'album': {'name': 'Album'}, 'uri': 'spotify:track:1'}}],

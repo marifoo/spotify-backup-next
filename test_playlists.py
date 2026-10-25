@@ -281,6 +281,8 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                             'items': entries[:2], 'next': entries_next}
                     elif url.path == '/v1/playlists/empty/' + collection_field:
                         data = {'items': [], 'next': None}
+                    elif url.path == '/v1/tracks/1':
+                        data = {'id': '1'}
                     else:
                         self.fail('Unexpected request: ' + request.full_url)
                     return io.BytesIO(json.dumps(data).encode('utf-8'))
@@ -298,7 +300,8 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                 urls = [request.args[0].full_url for request in send.call_args_list]
                 self.assertIn(playlist_next, urls)
                 self.assertIn(entries_next, urls)
-                self.assertEqual(len(urls), 10)
+                self.assertEqual(urls[-1], 'https://api.spotify.com/v1/tracks/1')
+                self.assertEqual(len(urls), 11)
 
     def test_combined_export_keeps_liked_songs_and_albums(self):
         spotify = Mock()
