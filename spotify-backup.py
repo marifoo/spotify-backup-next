@@ -35,7 +35,7 @@ class SpotifyAPI:
 			url += ('&' if '?' in url else '?') + urllib.parse.urlencode(params)
 	
 		# Try the sending off the request a specified number of times before giving up.
-		for _ in range(tries):
+		for attempt in range(tries):
 			try:
 				req = urllib.request.Request(url)
 				req.add_header('Authorization', 'Bearer ' + self._auth)
@@ -44,8 +44,17 @@ class SpotifyAPI:
 				return json.load(reader(res))
 			except Exception as err:
 				logging.info('Couldn\'t load URL: {} ({})'.format(url, err))
-				time.sleep(2)
-				logging.info('Trying again...')
+				if attempt + 1 < tries:
+					delay = 2
+					if isinstance(err, urllib.error.HTTPError) and err.code == 429:
+						try:
+							retry_after = int(err.headers.get('Retry-After'))
+							if retry_after >= 0:
+								delay = retry_after
+						except (AttributeError, TypeError, ValueError):
+							pass
+					logging.info('Trying again in %s seconds...', delay)
+					time.sleep(delay)
 		sys.exit(1)
 	
 	# The Spotify API breaks long lists into multiple pages. This method automatically
