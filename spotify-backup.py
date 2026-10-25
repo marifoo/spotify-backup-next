@@ -361,7 +361,7 @@ def main():
 	                    'require user-library-read')
 	parser.add_argument('--dump', default='playlists', choices=['liked,playlists', 'playlists,liked', 'playlists', 'liked'],
 	                    help='dump playlists, liked songs and albums (liked), or both (default: playlists)')
-	parser.add_argument('--format', default='txt', choices=['json', 'txt'], help='output format (default: txt)')
+	parser.add_argument('--format', choices=['json', 'txt'], help='output format (default: infer from .json/.txt/.tsv; txt without an extension)')
 	parser.add_argument('--client-id', default=os.environ.get('SPOTIFY_CLIENT_ID'),
 	                    help='Spotify app client ID (default: SPOTIFY_CLIENT_ID or bundled app)')
 	parser.add_argument('file', help='output filename', nargs='?')
@@ -369,8 +369,20 @@ def main():
 	
 	# If they didn't give a filename, then just prompt them. (They probably just double-clicked.)
 	while not args.file:
-		args.file = input('Enter a file name (e.g. playlists.txt): ')
-		args.format = args.file.split('.')[-1]
+		try:
+			filename = input('Enter a file name (e.g. playlists.txt): ')
+		except EOFError:
+			parser.exit(1, 'No output filename supplied. Pass a filename on the command line.\n')
+		except KeyboardInterrupt:
+			parser.exit(130, 'Export cancelled.\n')
+		if filename.strip():
+			args.file = filename
+	if args.format is None:
+		suffix = os.path.splitext(args.file)[1].lower()
+		formats = {'': 'txt', '.txt': 'txt', '.tsv': 'txt', '.json': 'json'}
+		if suffix not in formats:
+			parser.error('Cannot infer output format from the filename. Use --format=txt or --format=json.')
+		args.format = formats[suffix]
 	
 	# Log into the Spotify API.
 	if args.token:

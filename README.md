@@ -13,6 +13,11 @@ or, to get a JSON dump, use:
 
     python3 spotify-backup.py playlists.json --format=json
 
+`--format` always takes precedence over the filename, including when you enter
+the filename at the prompt. Without it, `.json` selects JSON and `.txt` or `.tsv`
+selects tab-separated text; extensions are case-insensitive. A filename without
+an extension defaults to text. For any other extension, specify `--format`.
+
 By default, it exports your playlists. To also include your Liked Songs and saved
 albums, use:
 

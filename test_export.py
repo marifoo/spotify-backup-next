@@ -11,6 +11,50 @@ from unittest.mock import Mock, patch
 from test_auth import backup
 
 
+class CLIFormatTests(unittest.TestCase):
+    def test_format_precedence_is_consistent_for_positional_and_prompted_paths(self):
+        cases = [('backup.json', None, 'json'), ('backup.JSON', None, 'json'),
+                 ('backup.txt', None, 'txt'), ('backup.tsv', None, 'txt'),
+                 ('backup', None, 'txt'), ('backup.txt', 'json', 'json'),
+                 ('backup.json', 'txt', 'txt'), ('backup.custom', 'json', 'json')]
+        for prompted in (False, True):
+            for filename, explicit, expected in cases:
+                with self.subTest(prompted=prompted, filename=filename, explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / filename
+                    argv = ['script', '--token=test'] + ([] if prompted else [str(path)])
+                    if explicit:
+                        argv += ['--format=' + explicit]
+                    with patch.object(backup.sys, 'argv', argv), patch('builtins.input', return_value=str(path)), patch.object(backup, 'load_backup', return_value=([], [])):
+                        backup.main()
+                    if expected == 'json':
+                        self.assertEqual(json.loads(path.read_text()), {'playlists': [], 'albums': []})
+                    else:
+                        self.assertEqual(path.read_bytes(), b'Playlists: \r\n\r\n')
+
+    def test_unknown_suffix_fails_before_login_for_both_input_modes(self):
+        for prompted in (False, True):
+            with self.subTest(prompted=prompted), patch.object(backup.sys, 'argv', ['script'] + ([] if prompted else ['backup.custom'])), patch('builtins.input', return_value='backup.custom'), patch.object(backup.SpotifyAPI, 'authorize') as authorize, patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
+                with self.assertRaises(SystemExit) as error:
+                    backup.main()
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn('--format', stderr.getvalue())
+                authorize.assert_not_called()
+
+    def test_blank_input_reprompts_and_eof_or_cancel_are_controlled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['script', '--token=test']), patch('builtins.input', side_effect=['', '   ', str(path)]) as prompt, patch.object(backup, 'load_backup', return_value=([], [])):
+                backup.main()
+            self.assertEqual(prompt.call_count, 3)
+            self.assertEqual(json.loads(path.read_text()), {'playlists': [], 'albums': []})
+        for failure, code in ((EOFError(), 1), (KeyboardInterrupt(), 130)):
+            with self.subTest(failure=type(failure)), patch.object(backup.sys, 'argv', ['script']), patch('builtins.input', side_effect=failure), patch.object(backup.SpotifyAPI, 'authorize') as authorize, patch.object(backup.sys, 'stderr', io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    backup.main()
+                self.assertEqual(error.exception.code, code)
+                authorize.assert_not_called()
+
+
 class AtomicWriteTests(unittest.TestCase):
     def test_write_failures_preserve_previous_backup_and_remove_temporary_file(self):
         for output_format in ('txt', 'json'):
