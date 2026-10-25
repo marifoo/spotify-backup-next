@@ -1,15 +1,36 @@
 spotify-backup
 ==============
 
-A Python script that exports all of your Spotify playlists, useful for paranoid Spotify users like me, afraid that one day Spotify will go under and take all of our playlists with it!
+A Python script that backs up accessible Spotify playlists, Liked Songs, and
+saved albums as tab-separated text or JSON.
 
-To run the script, [save it from here](https://raw.githubusercontent.com/caseychu/spotify-backup/master/spotify-backup.py) and double-click it. It'll ask you for a filename and then pop open a web page so you can authorize access to the Spotify API. Then the script will load your playlists and save a tab-separated file with your playlists that you can open in Excel. You can even copy-paste the rows from Excel into a Spotify playlist.
+You need **Python 3.11 or newer**. No third-party Python packages are required.
+Download [spotify-backup.py from this repository](https://raw.githubusercontent.com/marifoo/spotify-backup-next/master/spotify-backup.py),
+or use the script in your checkout of this repository.
 
-You can run the script from the command line:
+Open a terminal in the folder containing the script so that progress and errors
+remain visible. On Windows, run:
+
+    py -3 spotify-backup.py playlists.txt
+
+On macOS or Linux, run:
 
     python3 spotify-backup.py playlists.txt
 
-or, to get a JSON dump, use:
+If Python is not installed or the command is not found, install
+[Python](https://www.python.org/downloads/) and reopen your terminal. Check the
+version with `py -3 --version` on Windows or `python3 --version` on macOS/Linux.
+
+The script opens your browser to authorize Spotify access, downloads the selected
+collections, and saves the backup. Without a filename argument, it prompts for
+one. You can also double-click the script if your system associates `.py` files
+with Python. TXT files can be imported into a spreadsheet application.
+
+To see all options without logging in, run `py -3 spotify-backup.py --help` on
+Windows or `python3 spotify-backup.py --help` on macOS/Linux.
+
+The examples below use `python3`; on Windows, substitute `py -3`. To get a JSON
+dump, use:
 
     python3 spotify-backup.py playlists.json --format=json
 
@@ -95,5 +116,8 @@ to have Premium and limits these apps to five authorized users; see
 Tests use Python's standard library, mocked API responses, and a local callback server:
 
     python3 -m unittest -v
+
+On Windows, run `py -3 -m unittest -v`. Run tests from the repository folder;
+they require no Spotify credentials and make no requests to Spotify.
 
 Playlist folders don't show up in the API, sadly.
