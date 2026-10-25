@@ -202,10 +202,11 @@ def main():
 	parser = argparse.ArgumentParser(description='Exports your Spotify playlists. By default, opens a browser window '
 	                                           + 'to authorize the Spotify Web API, but you can also manually specify'
 	                                           + ' an OAuth token with the --token option.')
-	parser.add_argument('--token', metavar='OAUTH_TOKEN', help='use a Spotify OAuth token (requires the '
-	                                                         + '`playlist-read-private` permission)')
+	parser.add_argument('--token', metavar='OAUTH_TOKEN', help='use a Spotify OAuth token; playlists require '
+	                    'playlist-read-private and playlist-read-collaborative; liked songs and albums '
+	                    'require user-library-read')
 	parser.add_argument('--dump', default='playlists', choices=['liked,playlists', 'playlists,liked', 'playlists', 'liked'],
-	                    help='dump playlists or liked songs, or both (default: playlists)')
+	                    help='dump playlists, liked songs and albums (liked), or both (default: playlists)')
 	parser.add_argument('--format', default='txt', choices=['json', 'txt'], help='output format (default: txt)')
 	parser.add_argument('--client-id', default=os.environ.get('SPOTIFY_CLIENT_ID'),
 	                    help='Spotify app client ID (default: SPOTIFY_CLIENT_ID or bundled app)')
