@@ -64,7 +64,8 @@ class SpotifyAPI:
 			delay = 2
 			try:
 				req = urllib.request.Request(url)
-				req.add_header('Authorization', 'Bearer ' + self._auth)
+				# Bearer credentials belong only on the validated initial URL.
+				req.add_unredirected_header('Authorization', 'Bearer ' + self._auth)
 				with urllib.request.urlopen(req, timeout=30) as res:
 					reader = codecs.getreader('utf-8')
 					return json.load(reader(res))

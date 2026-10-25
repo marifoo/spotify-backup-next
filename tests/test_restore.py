@@ -118,6 +118,92 @@ class RestoreTests(unittest.TestCase):
         self.run_plan(api, plan)
         self.assertEqual(len(api.writes), before)
 
+    def test_pending_append_is_not_retried_before_the_original_commits(self):
+        plan = restore.build_plan(data(playlist()), 'old')
+        api = FakeAPI()
+        pending = []
+        original_write = api.write
+
+        def defer_append(method, endpoint, body=None, params=None):
+            if endpoint.endswith('/items'):
+                api.writes.append((method, endpoint, body, params))
+                pending.extend(body['uris'])
+                raise restore.RestoreError('Request still pending after timeout')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=defer_append):
+            with self.assertRaisesRegex(restore.RestoreError, 'pending after timeout'):
+                self.run_plan(api, plan)
+        before = len(api.writes)
+        with self.assertRaisesRegex(restore.RestoreError, 'append outcome is uncertain'):
+            self.run_plan(api, plan)
+        self.assertEqual(len(api.writes), before)
+        # The original request can commit even after the local process stopped.
+        api.contents.extend(pending)
+        self.run_plan(api, plan)
+        self.assertEqual(api.contents, plan[0]['uris'])
+        self.assertEqual(len(api.writes), before)
+
+    def test_rejected_append_can_be_retried_on_resume(self):
+        plan = restore.build_plan(data(playlist()), 'old')
+        api = FakeAPI()
+        original_write = api.write
+
+        def reject_append(method, endpoint, body=None, params=None):
+            if endpoint.endswith('/items'):
+                raise restore.RejectedWrite('Rate limited before commit')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=reject_append):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, plan)
+        self.run_plan(api, plan)
+        self.assertEqual(api.contents, plan[0]['uris'])
+
+    def test_later_rejection_preserves_the_previous_committed_batch_marker(self):
+        plan = restore.build_plan(data(playlist(ids=tuple(map(str, range(205))))), 'old')
+        api = FakeAPI()
+        original_write = api.write
+        appends = 0
+
+        def reject_second_append(method, endpoint, body=None, params=None):
+            nonlocal appends
+            if endpoint.endswith('/items'):
+                appends += 1
+                if appends == 2:
+                    raise restore.RejectedWrite('Rate limited before commit')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=reject_second_append):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, plan)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state['actions']['0']['appending'], {'start': 0, 'end': 100})
+        before = len(api.writes)
+        with patch.object(api, 'list', return_value=[]):
+            with self.assertRaisesRegex(restore.RestoreError, 'append outcome is uncertain'):
+                self.run_plan(api, plan)
+        self.assertEqual(len(api.writes), before)
+        self.run_plan(api, plan)
+        self.assertEqual(api.contents, plan[0]['uris'])
+
+    def test_failure_saving_append_marker_prevents_sending_the_batch(self):
+        plan = restore.build_plan(data(playlist()), 'old')
+        api = FakeAPI()
+        original_save = restore.save_state
+
+        def fail_append_marker(path, state):
+            if 'appending' in state['actions'].get('0', {}):
+                raise OSError('Journal storage failed')
+            original_save(path, state)
+
+        with patch.object(restore, 'save_state', side_effect=fail_append_marker):
+            with self.assertRaisesRegex(OSError, 'storage failed'):
+                self.run_plan(api, plan)
+        self.assertFalse(any(w[1].endswith('/items') for w in api.writes))
+        self.run_plan(api, plan)
+        self.assertEqual(api.contents, plan[0]['uris'])
+
     def test_follow_original_and_save_library_in_40_item_batches(self):
         source = data(playlist(owner='other'), {'name': 'Liked Songs', 'tracks': tracks(*map(str, range(81)))})
         plan = restore.build_plan(source, 'old')
@@ -133,6 +219,45 @@ class RestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(restore.RestoreError, 'does not match'):
             self.run_plan(api, restore.build_plan(data(playlist(name='Changed')), 'old'))
         self.assertEqual(len(api.writes), before)
+
+    def test_older_incomplete_copy_journal_requires_explicit_recovery(self):
+        api = FakeAPI()
+        plan = restore.build_plan(data(playlist()), 'old')
+        self.run_plan(api, plan)
+        state = json.loads(self.state.read_text())
+        state['version'] = 1
+        state['actions']['0'].pop('done')
+        self.state.write_text(json.dumps(state))
+        before = len(api.writes)
+        with self.assertRaisesRegex(restore.RestoreError, 'Older journal'):
+            self.run_plan(api, plan)
+        self.assertEqual(len(api.writes), before)
+        state['version'] = 2
+        self.state.write_text(json.dumps(state))
+        self.run_plan(api, plan)
+        self.assertEqual(len(api.writes), before)
+
+    def test_older_completed_journal_upgrades_without_repeating_writes(self):
+        api = FakeAPI()
+        plan = restore.build_plan(data(playlist()), 'old')
+        self.run_plan(api, plan)
+        state = json.loads(self.state.read_text())
+        state['version'] = 1
+        self.state.write_text(json.dumps(state))
+        before = len(api.writes)
+        self.run_plan(api, plan)
+        self.assertEqual(len(api.writes), before)
+        self.assertEqual(json.loads(self.state.read_text())['version'], 2)
+
+    def test_path_resolution_errors_stop_cleanly_before_login(self):
+        with (
+            patch.object(Path, 'resolve', side_effect=OSError('Cannot resolve path')),
+            patch.object(restore.backup.SpotifyAPI, 'authorize') as login,
+            patch('sys.stdout', new=io.StringIO()) as output,
+        ):
+            self.assertEqual(restore.main(['backup.json', '--source-user', 'old']), 1)
+        login.assert_not_called()
+        self.assertIn('Restore stopped: Cannot resolve path', output.getvalue())
 
     def test_uncertain_create_is_not_repeated(self):
         api = FakeAPI()
@@ -172,6 +297,27 @@ class RestoreTests(unittest.TestCase):
         request = send.call_args.args[0]
         self.assertEqual(request.get_method(), 'POST')
         self.assertEqual(json.loads(request.data), {'name': 'Test', 'public': False})
+
+    def test_write_token_is_not_forwarded_by_redirects(self):
+        with patch.object(restore.urllib.request, 'urlopen', return_value=io.BytesIO(b'{}')) as send:
+            restore.WriteAPI('secret-token').write('POST', 'me/playlists', {'name': 'Test'})
+        request = send.call_args.args[0]
+        self.assertEqual(request.get_header('Authorization'), 'Bearer secret-token')
+        redirected = restore.urllib.request.HTTPRedirectHandler().redirect_request(
+            request, None, 302, 'Found', {}, 'http://collector.invalid/capture')
+        self.assertIsNone(redirected.get_header('Authorization'))
+
+    def test_malformed_destination_items_stop_before_appending(self):
+        plan = restore.build_plan(data(playlist()), 'old')
+        api = FakeAPI()
+        for entry in (None, {}, {'item': None}, {'track': []}, {'item': {'uri': None}}):
+            with self.subTest(entry=entry), patch.object(api, 'list', return_value=[entry]):
+                with self.assertRaisesRegex(restore.RestoreError, 'Cannot verify'):
+                    self.run_plan(api, plan)
+                self.assertFalse(any(w[1].endswith('/items') for w in api.writes))
+        self.run_plan(api, plan)
+        self.assertEqual(api.contents, plan[0]['uris'])
+        self.assertEqual(len([w for w in api.writes if w[1] == 'me/playlists']), 1)
 
     def test_episode_only_playlist_resumes_without_duplicate_append(self):
         source = playlist(ids=())
@@ -216,6 +362,34 @@ class RestoreTests(unittest.TestCase):
         self.run_plan(api, plan)
         self.assertEqual(api.contents, plan[0]['uris'])
 
+    def state_alias(self):
+        alias = self.state.with_name('alias.json')
+        try:
+            alias.symlink_to(self.state)
+        except (OSError, NotImplementedError):
+            self.skipTest('Creating symlinks is unavailable on this system.')
+        return alias
+
+    def test_state_alias_uses_the_same_lock(self):
+        alias = self.state_alias()
+        api = FakeAPI()
+        plan = restore.build_plan(data(playlist()), 'old')
+        with restore.state_lock(self.state):
+            with self.assertRaisesRegex(restore.RestoreError, 'lock'):
+                restore.execute_plan(api, plan, 'new', alias)
+        self.assertEqual(api.writes, [])
+
+    def test_state_alias_updates_the_original_journal_for_resume(self):
+        alias = self.state_alias()
+        api = FakeAPI()
+        plan = restore.build_plan(data(playlist()), 'old')
+        restore.execute_plan(api, plan, 'new', alias)
+        self.assertTrue(alias.is_symlink())
+        self.assertTrue(self.state.exists())
+        before = len(api.writes)
+        self.run_plan(api, plan)
+        self.assertEqual(len(api.writes), before)
+
     def test_invalid_journal_actions_fail_before_any_write(self):
         source = data(playlist(), {'name': 'Liked Songs', 'tracks': tracks('a', 'b')})
         plan = restore.build_plan(source, 'old')
@@ -224,7 +398,8 @@ class RestoreTests(unittest.TestCase):
         original = json.loads(self.state.read_text())
         invalid = [None, [], {'offset': 999}, {'offset': -1}, {'offset': True},
                    {'offset': '1'}, {'done': 'yes'}, {'done': True},
-                   {'offset': 1}, {'playlist_id': 'wrong'}, {'creating': True}]
+                   {'offset': 1}, {'playlist_id': 'wrong'}, {'creating': True},
+                   {'appending': {'start': 0, 'end': 1}}]
         for progress in invalid:
             with self.subTest(progress=progress):
                 state = json.loads(json.dumps(original))
@@ -249,13 +424,33 @@ class RestoreTests(unittest.TestCase):
         ]
         for actions in invalid:
             with self.subTest(actions=actions):
-                state = dict(version=1, identity=identity, target_user='new', actions=actions)
+                state = dict(version=2, identity=identity, target_user='new', actions=actions)
                 with self.assertRaisesRegex(restore.RestoreError, 'invalid'):
                     restore.validate_state(state, plan, identity, 'new')
         # Manual creation recovery deliberately keeps creating until the ID is supplied.
-        state = dict(version=1, identity=identity, target_user='new',
+        state = dict(version=2, identity=identity, target_user='new',
                      actions={'0': {'creating': True, 'playlist_id': 'recovered'}})
         restore.validate_state(state, plan, identity, 'new')
+
+    def test_invalid_pending_append_progress_is_rejected(self):
+        plan = restore.build_plan(data(playlist(ids=tuple(map(str, range(205))))), 'old')
+        invalid = [None, [], {}, {'start': 0}, {'start': 0, 'end': 206},
+                   {'start': -1, 'end': 1}, {'start': 0, 'end': 101},
+                   {'start': True, 'end': 1}, {'start': 0, 'end': '1'},
+                   {'start': 1, 'end': 1}, {'start': 2, 'end': 1},
+                   {'start': 0, 'end': 1, 'extra': 1}]
+        for pending in invalid:
+            with self.subTest(pending=pending):
+                state = dict(version=2, identity='test', target_user='new', actions={
+                    '0': {'playlist_id': 'created', 'appending': pending}})
+                with self.assertRaisesRegex(restore.RestoreError, 'invalid pending append'):
+                    restore.validate_state(state, plan, 'test', 'new')
+        for extra in ({'done': True}, {'playlist_id': None}):
+            progress = {'playlist_id': 'created', 'appending': {'start': 0, 'end': 100}}
+            progress.update(extra)
+            state = dict(version=2, identity='test', target_user='new', actions={'0': progress})
+            with self.assertRaisesRegex(restore.RestoreError, 'invalid'):
+                restore.validate_state(state, plan, 'test', 'new')
 
     def test_relinked_backup_restores_original_across_destination_markets(self):
         source = playlist(ids=())
@@ -274,6 +469,34 @@ class RestoreTests(unittest.TestCase):
         source['tracks'][0]['track']['linked_from'] = ['malformed']
         with self.assertRaisesRegex(restore.RestoreError, 'linked track'):
             restore.build_plan(data(source), 'old')
+
+    def test_relinked_tracks_without_linked_from_verify_and_resume(self):
+        plan = restore.build_plan(data(playlist(ids=('original', 'stable', 'original'))), 'old')
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                self.state = self.state.with_name('relinked-{}.json'.format(interrupted))
+                api = FakeAPI()
+                api.fail_append = interrupted
+                original_get = api.get
+
+                def get(endpoint):
+                    if endpoint == 'tracks/original':
+                        return {'uri': 'spotify:track:replacement'}
+                    return original_get(endpoint)
+
+                def destination_items(*args, **kwargs):
+                    return [{'item': {'uri': uri.replace(':original', ':replacement')}}
+                            for uri in api.contents]
+
+                with patch.object(api, 'get', side_effect=get) as requests, \
+                        patch.object(api, 'list', side_effect=destination_items):
+                    if interrupted:
+                        with self.assertRaisesRegex(restore.RestoreError, 'Lost response'):
+                            self.run_plan(api, plan)
+                    self.run_plan(api, plan)
+                self.assertEqual(api.contents, plan[0]['uris'])
+                self.assertEqual(sum(c.args[0] == 'tracks/original' for c in requests.call_args_list), 1)
+                self.assertEqual(len([w for w in api.writes if w[1].endswith('/items')]), 1)
 
     def test_apply_output_escapes_terminal_control_characters(self):
         name = 'name\nFAKE SUCCESS\x1b[2J'

@@ -13,6 +13,9 @@ operations. A .lock sidecar prevents simultaneous runs using the same state file
 Keep the lock file; the operating system releases its lock when a process exits.
 If playlist creation has an uncertain outcome, the script stops rather than
 automatically creating a duplicate; inspect the destination and state manually.
+An uncertain append is resumed automatically only once its items are visible.
+Otherwise, inspect the destination and let any pending request settle before
+manually clearing the action's appending marker to allow another attempt.
 This initial version supports JSON only, not TXT/TSV. No third-party packages.
 Copies preserve names, descriptions, order, and duplicates of supported items.
 They do not preserve original IDs, followers, collaborators, cover art, or added
@@ -167,7 +170,8 @@ class WriteAPI(backup.SpotifyAPI):
         request = urllib.request.Request(
             url, method=method,
             data=json.dumps(body).encode('utf-8') if body is not None else b'',
-            headers={'Authorization': 'Bearer ' + self._auth, 'Content-Type': 'application/json'})
+            headers={'Content-Type': 'application/json'})
+        request.add_unredirected_header('Authorization', 'Bearer ' + self._auth)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = response.read()
@@ -203,6 +207,8 @@ def playlist_uris(api, playlist_id):
                        {'limit': 50, 'additional_types': 'track,episode'})
     result = []
     for entry in entries:
+        if not isinstance(entry, dict):
+            raise RestoreError('Cannot verify destination playlist contents; Spotify returned malformed items.')
         item = entry.get('item', entry.get('track'))
         if not isinstance(item, dict) or not isinstance(item.get('uri'), str):
             raise RestoreError('Cannot verify destination playlist contents; inspect it before resuming.')
@@ -211,13 +217,39 @@ def playlist_uris(api, playlist_id):
     return result
 
 
+def playlist_matches(api, actual, expected, track_cache):
+    """Accept market substitutions only when Spotify confirms the requested ID."""
+    if len(actual) != len(expected):
+        return False
+    for observed, requested in zip(actual, expected):
+        if observed == requested:
+            continue
+        if not (observed.startswith('spotify:track:') and requested.startswith('spotify:track:')):
+            return False
+        # Development Mode no longer supplies linked_from. Query the requested
+        # track with the target user's token to establish its market substitute.
+        if requested not in track_cache:
+            track = api.get('tracks/' + requested.rsplit(':', 1)[1])
+            uri = track.get('uri') if isinstance(track, dict) else None
+            if not isinstance(uri, str) or not re.fullmatch(r'spotify:track:[A-Za-z0-9]+', uri):
+                raise RestoreError('Cannot verify destination-market track identity; keep the state file.')
+            track_cache[requested] = uri
+        if observed != track_cache[requested]:
+            return False
+    return True
+
+
 def execute_plan(api, plan, target_user, state_path):
+    # Resolve once so aliases share a lock and atomic replacement updates the
+    # journal itself instead of replacing a symlink with a separate journal.
+    state_path = state_path.resolve()
     with state_lock(state_path):
         _execute_plan(api, plan, target_user, state_path)
 
 
 def validate_state(state, plan, identity, target_user):
-    if (not isinstance(state, dict) or state.get('version') != 1
+    if (not isinstance(state, dict) or type(state.get('version')) is not int
+            or state['version'] not in (1, 2)
             or state.get('identity') != identity or state.get('target_user') != target_user
             or not isinstance(state.get('actions'), dict)):
         raise RestoreError('State file does not match this plan and destination.')
@@ -225,7 +257,7 @@ def validate_state(state, plan, identity, target_user):
     valid_keys = {str(i) for i in range(len(plan))}
     for key, progress in state['actions'].items():
         if (key not in valid_keys or not isinstance(progress, dict)
-                or any(k not in {'done', 'offset', 'creating', 'playlist_id'} for k in progress)
+                or any(k not in {'done', 'offset', 'creating', 'playlist_id', 'appending'} for k in progress)
                 or any(k in progress and type(progress[k]) is not bool for k in ('done', 'creating'))):
             raise RestoreError('State file contains invalid action progress.')
         action = plan[int(key)]
@@ -237,13 +269,26 @@ def validate_state(state, plan, identity, target_user):
                 raise RestoreError('State file contains invalid playlist progress.')
             if playlist_id:
                 playlist_ids.add(playlist_id)
+            if 'appending' in progress:
+                pending = progress['appending']
+                if (not playlist_id or progress.get('done')
+                        or not isinstance(pending, dict) or set(pending) != {'start', 'end'}
+                        or type(pending['start']) is not int or type(pending['end']) is not int
+                        or not 0 <= pending['start'] < pending['end'] <= len(action['uris'])
+                        or pending['end'] - pending['start'] > 100):
+                    raise RestoreError('State file contains invalid pending append progress.')
+            if state['version'] == 1 and playlist_id and not progress.get('done'):
+                raise RestoreError(
+                    'Older journal cannot establish whether an append is still pending. Inspect '
+                    'the destination and let outstanding requests settle, then set version to 2 '
+                    'in this state file before resuming.')
         elif action['kind'] in ('follow', 'library'):
             total = 1 if action['kind'] == 'follow' else len(set(action['uris']))
             offset = progress.get('offset', 0)
             if (type(offset) is not int or not 0 <= offset <= total
                     or (offset != total and offset % 40 != 0)
                     or (progress.get('done') and offset != total)
-                    or 'playlist_id' in progress or 'creating' in progress):
+                    or 'playlist_id' in progress or 'creating' in progress or 'appending' in progress):
                 raise RestoreError('State file contains invalid library progress.')
         else:
             raise RestoreError('State file contains progress for a skipped action.')
@@ -259,10 +304,14 @@ def _execute_plan(api, plan, target_user, state_path):
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding='utf-8'))
         validate_state(state, plan, identity, target_user)
+        if state['version'] == 1:
+            state['version'] = 2
+            save_state(state_path, state)
     else:
-        state = dict(version=1, identity=identity, target_user=target_user, actions={})
+        state = dict(version=2, identity=identity, target_user=target_user, actions={})
         save_state(state_path, state)
 
+    track_cache = {}
     for index, action in enumerate(plan):
         if action['kind'] == 'skip':
             continue
@@ -309,14 +358,34 @@ def _execute_plan(api, plan, target_user, state_path):
                 raise RestoreError('Destination playlist is not owned by the target account.')
             existing = playlist_uris(api, playlist_id)
             expected = action['uris']
-            if existing != expected[:len(existing)] or len(existing) > len(expected):
+            if len(existing) > len(expected) or not playlist_matches(
+                    api, existing, expected[:len(existing)], track_cache):
                 raise RestoreError('Destination playlist differs from backup. Restore stopped; no overwrite.')
+            pending = progress.get('appending')
+            if pending and len(existing) < pending['end']:
+                raise RestoreError(
+                    'Playlist append outcome is uncertain for action {} ({}). The original request '
+                    'may still commit. Wait and resume; if its items remain absent, inspect the '
+                    'destination and confirm the request has settled before manually removing '
+                    'appending from this action in the state file.'.format(index, repr(action['name'])))
             # Reconcile actual contents after an interrupted append before sending more.
             for start in range(len(existing), len(expected), 100):
-                api.write('POST', 'playlists/{}/items'.format(playlist_id),
-                          {'uris': expected[start:start + 100]})
-            if playlist_uris(api, playlist_id) != expected:
+                batch = expected[start:start + 100]
+                previous_append = progress.get('appending')
+                progress['appending'] = {'start': start, 'end': start + len(batch)}
+                save_state(state_path, state)
+                try:
+                    api.write('POST', 'playlists/{}/items'.format(playlist_id), {'uris': batch})
+                except RejectedWrite:
+                    if previous_append is None:
+                        progress.pop('appending', None)
+                    else:
+                        progress['appending'] = previous_append
+                    save_state(state_path, state)
+                    raise
+            if not playlist_matches(api, playlist_uris(api, playlist_id), expected, track_cache):
                 raise RestoreError('Playlist verification failed; keep the state file and inspect skipped media.')
+            progress.pop('appending', None)
         progress['done'] = True
         save_state(state_path, state)
 
@@ -336,9 +405,9 @@ def main(argv=None):
     if args.apply and (not args.target_user or not args.client_id):
         parser.error('--apply requires --target-user and --client-id (or SPOTIFY_CLIENT_ID)')
     state_path = args.state or Path(str(args.file) + '.restore-state.json')
-    if state_path.resolve() == args.file.resolve():
-        parser.error('The state file must differ from the backup file.')
     try:
+        if state_path.resolve() == args.file.resolve():
+            parser.error('The state file must differ from the backup file.')
         data = json.loads(args.file.read_text(encoding='utf-8-sig'))
         plan = build_plan(data, args.source_user, args.followed)
         print('Restore plan (copies will not be published on your profile; links remain accessible):')

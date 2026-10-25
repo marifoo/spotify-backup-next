@@ -91,6 +91,15 @@ class PaginationTests(unittest.TestCase):
 
 
 class RequestTests(unittest.TestCase):
+    def test_read_token_is_not_forwarded_by_redirects(self):
+        with patch.object(backup.urllib.request, 'urlopen', return_value=io.BytesIO(b'{}')) as send:
+            backup.SpotifyAPI('secret-token').get('me')
+        request = send.call_args.args[0]
+        self.assertEqual(request.get_header('Authorization'), 'Bearer secret-token')
+        redirected = backup.urllib.request.HTTPRedirectHandler().redirect_request(
+            request, None, 302, 'Found', {}, 'http://collector.invalid/capture')
+        self.assertIsNone(redirected.get_header('Authorization'))
+
     def http_error(self, status=429, headers=None):
         return urllib.error.HTTPError(
             'https://api.spotify.com/v1/me/tracks', status, 'Request failed', headers, None)
