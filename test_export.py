@@ -90,7 +90,10 @@ class OutputPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.txt'
             path.write_bytes(b'previous backup')
-            self.assertEqual(backup.check_output_path(str(path)), str(path.resolve()))
+            checked_path = Path(backup.check_output_path(str(path)))
+            self.assertTrue(checked_path.is_absolute())
+            # Windows may spell the same path using a short (8.3) name.
+            self.assertTrue(checked_path.samefile(path))
             self.assertEqual(path.read_bytes(), b'previous backup')
             self.assertEqual(list(Path(directory).iterdir()), [path])
 
