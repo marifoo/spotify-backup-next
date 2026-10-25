@@ -28,6 +28,16 @@ TXT exports quote fields containing tabs, line breaks, or double quotes so their
 contents are preserved. Import these files as tab-delimited text with double
 quotes as the text qualifier in your spreadsheet application.
 
+Playlist exports automatically support Spotify's legacy and updated API response
+formats; no CLI switch is needed. JSON keeps the existing `playlists[].tracks[]`
+entries with a `track` field, including null entries and other item metadata.
+
+Under Spotify's updated Development Mode restrictions, playlist contents are only
+available for playlists you own or collaborate on. If playlist contents are
+inaccessible or a download fails, the script reports the error and stops before
+creating or replacing the output file. See the
+[Spotify migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
+
 Browser login uses Authorization Code with PKCE. No client secret or additional
 Python packages are required. The script opens Spotify directly, receives the
 authorization on your computer, and keeps the access token in memory without
@@ -64,8 +74,8 @@ takes precedence. Spotify currently requires the owner of a Development Mode app
 to have Premium and limits these apps to five authorized users; see
 [Spotify's app access requirements](https://developer.spotify.com/documentation/web-api/concepts/quota-modes).
 
-Authentication tests use Python's standard library and a local callback server:
+Tests use Python's standard library, mocked API responses, and a local callback server:
 
     python3 -m unittest -v
 
-Collaborative playlists and playlist folders don't show up in the API, sadly.
+Playlist folders don't show up in the API, sadly.

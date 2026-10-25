@@ -21,6 +21,10 @@ import webbrowser
 logging.basicConfig(level=20, datefmt='%I:%M:%S', format='[%(asctime)s] %(message)s')
 
 
+class ExportError(Exception):
+	pass
+
+
 class SpotifyAPI:
 	
 	# Requires an OAuth token.
@@ -45,6 +49,8 @@ class SpotifyAPI:
 					return json.load(reader(res))
 			except Exception as err:
 				logging.info('Couldn\'t load URL: {} ({})'.format(url, err))
+				if attempt + 1 == tries:
+					raise ExportError('Could not load URL: {} ({})'.format(url, err)) from None
 				if attempt + 1 < tries:
 					delay = 2
 					if isinstance(err, urllib.error.HTTPError) and err.code == 429:
@@ -56,7 +62,7 @@ class SpotifyAPI:
 							pass
 					logging.info('Trying again in %s seconds...', delay)
 					time.sleep(delay)
-		sys.exit(1)
+		raise ExportError('Could not load URL: {}'.format(url))
 	
 	# The Spotify API breaks long lists into multiple pages. This method automatically
 	# fetches all pages and joins them, returning in a single list of objects.
@@ -173,6 +179,49 @@ def artist_names(artists):
 	return ', '.join(artist.get('name') or 'Unknown Artist' for artist in (artists or [])) or 'Unknown Artist'
 
 
+def load_playlist(spotify, playlist):
+	label = '"{}" ({})'.format(playlist['name'], playlist.get('id', 'unknown ID'))
+	# Both fields can occur during Spotify's migration; prefer the current endpoint.
+	collection = playlist.get('items') or playlist.get('tracks')
+	if not collection or not collection.get('href'):
+		raise ExportError('Cannot export playlist {}: Spotify did not expose its contents. '
+		                  'Development Mode apps may only read playlists you own or collaborate on.'.format(label))
+	logging.info('Loading playlist: %s (%s items)', label, collection.get('total', 'unknown'))
+	try:
+		entries = spotify.list(collection['href'], {'limit': 50, 'additional_types': 'track,episode'})
+	except ExportError as err:
+		raise ExportError('Could not export playlist {}. Check playlist access and token scopes. {}'.format(label, err)) from None
+	# Keep the existing export schema and all other metadata, including null items.
+	result = dict(playlist)
+	result.pop('items', None)
+	result['tracks'] = []
+	for entry in entries:
+		entry = dict(entry)
+		if 'item' in entry:
+			entry['track'] = entry.pop('item')
+		result['tracks'].append(entry)
+	return result
+
+
+def load_backup(spotify, dump):
+	logging.info('Loading user info...')
+	me = spotify.get('me')
+	logging.info('Logged in as {display_name} ({id})'.format(**me))
+	playlists = []
+	liked_albums = []
+	if 'liked' in dump:
+		logging.info('Loading liked albums and songs...')
+		liked_tracks = spotify.list('me/tracks', {'limit': 50})
+		liked_albums = spotify.list('me/albums', {'limit': 50})
+		playlists.append({'name': 'Liked Songs', 'tracks': liked_tracks})
+	if 'playlists' in dump:
+		logging.info('Loading playlists...')
+		playlist_data = spotify.list('me/playlists', {'limit': 50})
+		logging.info('Found %s playlists', len(playlist_data))
+		playlists.extend(load_playlist(spotify, playlist) for playlist in playlist_data)
+	return playlists, liked_albums
+
+
 def write_txt(f, playlists, liked_albums):
 	writer = csv.writer(f, delimiter='\t', lineterminator='\r\n')
 	writer.writerow(['Playlists: '])
@@ -239,32 +288,10 @@ def main():
 		except SpotifyAPI.AuthorizationError as err:
 			parser.exit(1, 'Authorization failed: {}\n'.format(err))
 	
-	# Get the ID of the logged in user.
-	logging.info('Loading user info...')
-	me = spotify.get('me')
-	logging.info('Logged in as {display_name} ({id})'.format(**me))
-
-	playlists = []
-	liked_albums = []
-
-	# List liked albums and songs
-	if 'liked' in args.dump:
-		logging.info('Loading liked albums and songs...')
-		liked_tracks = spotify.list('me/tracks', {'limit': 50})
-		liked_albums = spotify.list('me/albums', {'limit': 50})
-		playlists += [{'name': 'Liked Songs', 'tracks': liked_tracks}]
-
-	# List all playlists and the tracks in each playlist
-	if 'playlists' in args.dump:
-		logging.info('Loading playlists...')
-		playlist_data = spotify.list('users/{user_id}/playlists'.format(user_id=me['id']), {'limit': 50})
-		logging.info(f'Found {len(playlist_data)} playlists')
-
-		# List all tracks in each playlist
-		for playlist in playlist_data:
-			logging.info('Loading playlist: {name} ({tracks[total]} songs)'.format(**playlist))
-			playlist['tracks'] = spotify.list(playlist['tracks']['href'], {'limit': 100})
-		playlists += playlist_data
+	try:
+		playlists, liked_albums = load_backup(spotify, args.dump)
+	except ExportError as err:
+		parser.exit(1, 'Export failed: {}\n'.format(err))
 	
 	# Write the file.
 	logging.info('Writing files...')

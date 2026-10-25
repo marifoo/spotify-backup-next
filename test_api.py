@@ -28,9 +28,8 @@ class RequestTests(unittest.TestCase):
 
     def test_repeated_rate_limits_are_bounded_without_final_sleep(self):
         with patch.object(backup.urllib.request, 'urlopen', side_effect=self.http_error(headers={'Retry-After': '30'})) as send, patch.object(backup.time, 'sleep') as sleep:
-            with self.assertRaises(SystemExit) as exited:
+            with self.assertRaises(backup.ExportError):
                 backup.SpotifyAPI('token').get('me/tracks')
-        self.assertEqual(exited.exception.code, 1)
         self.assertEqual(send.call_count, 3)
         self.assertEqual(sleep.call_args_list, [call(30), call(30)])
 
@@ -62,9 +61,8 @@ class RequestTests(unittest.TestCase):
 
     def test_repeated_timeouts_exhaust_retries(self):
         with patch.object(backup.urllib.request, 'urlopen', side_effect=TimeoutError()) as send, patch.object(backup.time, 'sleep') as sleep:
-            with self.assertRaises(SystemExit) as exited:
+            with self.assertRaises(backup.ExportError):
                 backup.SpotifyAPI('token').get('me/tracks')
-        self.assertEqual(exited.exception.code, 1)
         self.assertEqual(send.call_count, 3)
         self.assertEqual(sleep.call_args_list, [call(2), call(2)])
 
