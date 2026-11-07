@@ -2,6 +2,7 @@
 
 Back up your Spotify playlists with only a few clicks. Simply download [spotify-backup.py](https://raw.githubusercontent.com/marifoo/spotify-backup-next/main/spotify-backup.py)
 and double-click it. It'll ask you for a filename and then open the Spotify web page, so you can authorize access.
+After it finishes, the window waits for Enter before closing.
 
 ## Setup
 
@@ -90,6 +91,22 @@ characters, receive a leading apostrophe.
 
 JSON preserves the metadata returned by Spotify and null entries, using
 `playlists[].tracks[].track` and each playlist's `snapshot_id`.
+The top-level `user` field records the Spotify user ID that created the backup.
+
+## Restoring a backup
+
+Restore accepts JSON backups only. Preview the changes first; preview is the default:
+
+```sh
+python3 spotify-restore.py backup.json
+python3 spotify-restore.py backup.json --apply --target-user NEW_ID --client-id YOUR_ID
+```
+
+Owned playlists are copied to the target account; followed playlists are followed.
+Use `--followed copy` or `--followed skip` to choose how followed playlists are handled.
+Keep the generated `backup.json.restore-state.json` to resume an interrupted restore. Removing a failing
+playlist from the backup or using `--followed skip` keeps progress for other actions.
+Pass `--source-user` only for backups created before the top-level `user` field was added.
 
 ## Login and access
 
@@ -116,7 +133,9 @@ If the bundled Spotify app is unavailable, create an app in the
 [Developer Dashboard](https://developer.spotify.com/dashboard), register
 `http://127.0.0.1:43019/redirect`, and pass `--client-id=YOUR_CLIENT_ID` or set
 `SPOTIFY_CLIENT_ID` (`--client-id` takes precedence). Development Mode requires
-the app owner to have Spotify Premium and users to be on the app's allowlist. See Spotify's
+the app owner to have Spotify Premium and users to be on the app's allowlist. The
+bundled client ID also runs in Development Mode and only works for users on its
+allowlist; otherwise, use your own app. See Spotify's
 [app access requirements](https://developer.spotify.com/documentation/web-api/concepts/quota-modes).
 
 ## Troubleshooting and backup checks
@@ -125,7 +144,7 @@ the app owner to have Spotify Premium and users to be on the app's allowlist. Se
 
 | Error | What to try |
 | --- | --- |
-| HTTP 401 | Log in again or supply a new access token. |
+| HTTP 401 | Browser logins refresh automatically during long runs. For `--token`, log in again or supply a new access token. |
 | HTTP 403 | Check token scopes, playlist access, and the app's user allowlist. |
 | HTTP 404 | Check whether the playlist or other resource is still available to your account. |
 
@@ -137,13 +156,13 @@ Downloads and writes that fail preserve any previous backup. Playlist version
 changes during download also stop the export; retry after editing stops. Media
 item counts are checked strictly. A playlist listing that returns fewer entries
 than Spotify's reported total warns and continues after loading all pages.
+If Liked Songs or saved albums change during export, the export stops; retry it.
 
 ### Sanity check
 
-After saving, a sanity check reads the file back and checks up to three randomly
-selected, distinct song IDs with Spotify. Local files, episodes, and unavailable
-entries are excluded; with no eligible songs, only the file is checked. Success
-prints `Sanity check passed.` Failure warns and keeps the saved backup.
+After saving, an offline sanity check reads the file back and compares it with the
+downloaded data. Success prints `Sanity check passed.` Failure keeps the saved
+backup and exits with code 1.
 
 ## Development
 
