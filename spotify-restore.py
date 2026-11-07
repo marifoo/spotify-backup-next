@@ -178,7 +178,10 @@ def build_plan(data, source_user=None, followed='follow'):
     if (source_user is not None and not isinstance(backup_user, str)
             and any('owned' in action for action in actions)
             and not any(action.get('owned') for action in actions)):
-        raise RestoreError("--source-user {!r} owns no playlist in this backup. If it is correct, add \"user\": \"{}\" to the backup's top level and omit --source-user.".format(source_user, source_user))
+        raise RestoreError(
+            "--source-user {!r} owns no playlist in this backup. If it is correct, add "
+            "\"user\": \"{}\" to the backup's top level and omit --source-user."
+            .format(source_user, source_user))
     uris, skipped = media_uris(data['albums'], 'album', {'album'})
     if uris or skipped:
         add_action(dict(kind='library', key='library:albums', name='Saved albums',
@@ -293,7 +296,9 @@ def library_fingerprint(action):
 
 def validate_state(state, plan, target_user):
     if not isinstance(state, dict) or state.get('version') != 3 or type(state.get('version')) is not int:
-        raise RestoreError('State file was written by an older script version. Starting a new state file can duplicate already-copied playlists.')
+        raise RestoreError(
+            'State file was written by an older script version. Starting a new state file '
+            'can duplicate already-copied playlists.')
     if state.get('target_user') != target_user or not isinstance(state.get('actions'), dict):
         raise RestoreError('State file does not match this destination.')
     known = {action['key']: action for action in plan if 'key' in action}
@@ -335,7 +340,9 @@ def validate_state(state, plan, target_user):
                 if not isinstance(fingerprint, str):
                     raise RestoreError('State file contains invalid library fingerprint.')
                 if not progress.get('done') and fingerprint != library_fingerprint(action):
-                    raise RestoreError("Library action '{}' changed since its progress was saved. Remove the '{}' entry from the state file to restart it.".format(action['name'], key))
+                    raise RestoreError(
+                        "Library action '{}' changed since its progress was saved. Remove the "
+                        "'{}' entry from the state file to restart it.".format(action['name'], key))
             total = 1 if action['kind'] == 'follow' else len(action['uris'])
             offset = progress.get('offset', 0)
             if (type(offset) is not int or offset < 0
@@ -345,6 +352,7 @@ def validate_state(state, plan, target_user):
                 raise RestoreError('State file contains invalid library progress.')
         else:
             raise RestoreError('State file contains progress for a skipped action.')
+
 
 def _execute_plan(api, plan, target_user, state_path):
     me = api.get('me')
