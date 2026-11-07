@@ -167,8 +167,9 @@ class WriteAPI(backup.SpotifyAPI):
     def write(self, method, endpoint, body=None, params=None):
         """Resend only after a confirmed 401 or 429 rejection."""
         url = self._url(endpoint, params)
-        refreshed = False
+        refreshed, attempts = False, 0
         while True:
+            attempts += 1
             request = urllib.request.Request(
                 url, method=method,
                 data=json.dumps(body).encode('utf-8') if body is not None else b'',
@@ -188,6 +189,12 @@ class WriteAPI(backup.SpotifyAPI):
                     except self.AuthorizationError:
                         pass
                     else:
+                        attempts -= 1
+                        continue
+                if status == 429:
+                    delay = backup.rate_limit_delay(err.headers)
+                    if delay is not None and attempts < 3:
+                        backup.time.sleep(delay)
                         continue
                 error = RejectedWrite if status in (400, 401, 403, 404, 429) else RestoreError
                 raise error('Spotify write failed (HTTP {}). Check permissions, access, '

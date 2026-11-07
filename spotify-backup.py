@@ -28,6 +28,16 @@ class ExportError(Exception):
 	pass
 
 
+def rate_limit_delay(headers, default=2):
+	try:
+		requested = int(headers.get('Retry-After'))
+		if requested >= 0:
+			return requested if requested <= 60 else None
+	except (AttributeError, TypeError, ValueError):
+		pass
+	return default
+
+
 class SpotifyAPI:
 	
 	# Requires an OAuth token.
@@ -91,13 +101,8 @@ class SpotifyAPI:
 					}.get(status, 'Spotify request failed.')
 					message = 'HTTP Error {}: {}'.format(status, guidance)
 					if status == 429:
-						try:
-							retry_after = int(err.headers.get('Retry-After'))
-							if retry_after >= 0:
-								delay = retry_after
-						except (AttributeError, TypeError, ValueError):
-							pass
-						if delay > 60:
+						delay = rate_limit_delay(err.headers)
+						if delay is None:
 							retry = False
 							message += ' Requested rate-limit wait exceeds 60 seconds. Retry later.'
 				finally:

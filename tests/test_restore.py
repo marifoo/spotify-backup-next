@@ -340,6 +340,62 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(mock_send.call_count, 2)
         self.assertNotIn('creating', json.loads(self.state.read_text())['actions']['0'])
 
+    def test_write_retries_429_after_retry_after(self):
+        api = restore.WriteAPI('token')
+        error = urllib.error.HTTPError('https://api.spotify.com/v1/me/library', 429, 'limited',
+                                       {'Retry-After': '5'}, None)
+        with patch.object(restore.urllib.request, 'urlopen', side_effect=[error, io.BytesIO(b'{}')]) as send, \
+                patch.object(restore.backup.time, 'sleep') as sleep:
+            self.assertEqual(api.write('PUT', 'me/library'), {})
+        self.assertEqual(send.call_count, 2)
+        sleep.assert_called_once_with(5)
+
+    def test_write_429_budget_exhausted_raises_rejected_write(self):
+        api = restore.WriteAPI('token')
+        errors = [urllib.error.HTTPError('url', 429, 'limited', {}, None) for _ in range(3)]
+        with patch.object(restore.urllib.request, 'urlopen', side_effect=errors) as send, \
+                patch.object(restore.backup.time, 'sleep') as sleep:
+            with self.assertRaises(restore.RejectedWrite):
+                api.write('POST', 'me/playlists')
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_write_429_long_wait_stops_without_sleeping(self):
+        api = restore.WriteAPI('token')
+        error = urllib.error.HTTPError('url', 429, 'limited', {'Retry-After': '61'}, None)
+        with patch.object(restore.urllib.request, 'urlopen', side_effect=error) as send, \
+                patch.object(restore.backup.time, 'sleep') as sleep:
+            with self.assertRaises(restore.RejectedWrite):
+                api.write('POST', 'me/playlists')
+        send.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_write_other_errors_still_single_shot(self):
+        for status in (400, 403, 404, 500):
+            with self.subTest(status=status):
+                error = urllib.error.HTTPError('url', status, 'error', {}, None)
+                with patch.object(restore.urllib.request, 'urlopen', side_effect=error) as send:
+                    with self.assertRaises(restore.RestoreError):
+                        restore.WriteAPI('token').write('POST', 'me/playlists')
+                send.assert_called_once()
+
+    def test_write_401_refresh_does_not_spend_429_budget(self):
+        api = restore.WriteAPI('old', client_id='client', refresh_token='refresh')
+        statuses = [429, 401, 429, 429]
+
+        def send(request, timeout):
+            if request.full_url.endswith('/api/token'):
+                return io.BytesIO(b'{"access_token":"new"}')
+            status = statuses.pop(0)
+            raise urllib.error.HTTPError(request.full_url, status, 'error', {}, None)
+
+        with patch.object(restore.urllib.request, 'urlopen', side_effect=send) as mock_send, \
+                patch.object(restore.backup.time, 'sleep') as sleep:
+            with self.assertRaises(restore.RejectedWrite):
+                api.write('POST', 'me/playlists')
+        self.assertEqual(mock_send.call_count, 5)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_malformed_destination_items_stop_before_appending(self):
         plan = restore.build_plan(data(playlist()), 'old')
         api = FakeAPI()
@@ -371,11 +427,13 @@ class RestoreTests(unittest.TestCase):
                 state = self.state.with_name('state-{}.json'.format(status))
                 error = urllib.error.HTTPError('https://api.spotify.com/v1/me/playlists', status, 'error', {}, None)
                 api = FakeAPI()
-                with patch.object(restore.urllib.request, 'urlopen', side_effect=error):
+                with patch.object(restore.urllib.request, 'urlopen', side_effect=error) as send, \
+                        patch.object(restore.backup.time, 'sleep'):
                     with self.assertRaises(restore.RestoreError):
                         with patch.object(api, 'write', side_effect=restore.WriteAPI('token').write):
                             restore.execute_plan(api, plan, 'new', state)
                 pending = json.loads(state.read_text())['actions']['0'].get('creating', False)
+                self.assertEqual(send.call_count, 3 if status == 429 else 1)
                 self.assertEqual(pending, status == 500)
                 if status != 500:
                     restore.execute_plan(api, plan, 'new', state)
