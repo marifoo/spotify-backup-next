@@ -15,6 +15,7 @@ import stat
 import sys
 import tempfile
 import time
+import traceback
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -538,6 +539,13 @@ def sanity_check(filename, output_format, expected):
 				raise ExportError('The saved text row count differs from the exported data')
 
 
+def pause():
+	try:
+		input('Press Enter to close...')
+	except (EOFError, KeyboardInterrupt):
+		pass
+
+
 def main():
 	# Parse arguments.
 	parser = argparse.ArgumentParser(description='Exports your Spotify playlists, Liked Songs, and saved albums.\n'
@@ -566,6 +574,7 @@ def main():
 	                    help='Spotify app client ID (default: SPOTIFY_CLIENT_ID or bundled app)')
 	parser.add_argument('file', help='output filename', nargs='?')
 	args = parser.parse_args()
+	prompted = not args.file
 	
 	# If they didn't give a filename, then just prompt them. (They probably just double-clicked.)
 	while not args.file:
@@ -577,53 +586,60 @@ def main():
 			parser.exit(130, 'Export cancelled.\n')
 		if filename.strip():
 			args.file = filename
-	if args.format is None:
-		suffix = os.path.splitext(args.file)[1].lower()
-		formats = {'': 'txt', '.txt': 'txt', '.tsv': 'txt', '.json': 'json'}
-		if suffix not in formats:
-			parser.error('Cannot infer output format from the filename. Use --format=txt or --format=json.')
-		args.format = formats[suffix]
 	try:
-		args.file = check_output_path(args.file)
-	except ExportError as err:
-		parser.exit(1, 'Export failed: {}\n'.format(err))
-	
-	# Log into the Spotify API.
-	if args.token:
-		spotify = SpotifyAPI(args.token)
-	else:
+		if args.format is None:
+			suffix = os.path.splitext(args.file)[1].lower()
+			formats = {'': 'txt', '.txt': 'txt', '.tsv': 'txt', '.json': 'json'}
+			if suffix not in formats:
+				parser.error('Cannot infer output format from the filename. Use --format=txt or --format=json.')
+			args.format = formats[suffix]
 		try:
-			spotify = SpotifyAPI.authorize(client_id=args.client_id or '5c098bcc800e45d49e476265bc9b6934',
-			                               scope='playlist-read-private playlist-read-collaborative user-library-read')
-		except SpotifyAPI.AuthorizationError as err:
-			parser.exit(1, 'Authorization failed: {}\n'.format(err))
+			args.file = check_output_path(args.file)
+		except ExportError as err:
+			parser.exit(1, 'Export failed: {}\n'.format(err))
 	
-	try:
-		data = load_backup(spotify, args.dump)
-	except ExportError as err:
-		parser.exit(1, 'Export failed: {}\n'.format(err))
+		# Log into the Spotify API.
+		if args.token:
+			spotify = SpotifyAPI(args.token)
+		else:
+			try:
+				spotify = SpotifyAPI.authorize(client_id=args.client_id or '5c098bcc800e45d49e476265bc9b6934',
+				                               scope='playlist-read-private playlist-read-collaborative user-library-read')
+			except SpotifyAPI.AuthorizationError as err:
+				parser.exit(1, 'Authorization failed: {}\n'.format(err))
 	
-	# Write the file.
-	logging.info('Writing files...')
-	try:
-		summaries = write_backup(args.file, args.format, data)
-	except (OSError, ValueError, TypeError, csv.Error) as err:
-		parser.exit(1, 'Could not write backup to {!r}: {}. Check free disk space and permissions.\n'.format(args.file, err))
-	except KeyboardInterrupt:
-		parser.exit(130, 'Export cancelled while writing the backup.\n')
-	for label, exported, unavailable in summaries or []:
-		logging.info('TXT collection %r: exported %s entries, unavailable %s', label, exported, unavailable)
-		if unavailable:
-			logging.warning('TXT omitted %s unavailable entries from %r; use --format=json to preserve null entries and available metadata.', unavailable, label)
+		try:
+			data = load_backup(spotify, args.dump)
+		except ExportError as err:
+			parser.exit(1, 'Export failed: {}\n'.format(err))
+	
+		# Write the file.
+		logging.info('Writing files...')
+		try:
+			summaries = write_backup(args.file, args.format, data)
+		except (OSError, ValueError, TypeError, csv.Error) as err:
+			parser.exit(1, 'Could not write backup to {!r}: {}. Check free disk space and permissions.\n'.format(args.file, err))
+		except KeyboardInterrupt:
+			parser.exit(130, 'Export cancelled while writing the backup.\n')
+		for label, exported, unavailable in summaries or []:
+			logging.info('TXT collection %r: exported %s entries, unavailable %s', label, exported, unavailable)
+			if unavailable:
+				logging.warning('TXT omitted %s unavailable entries from %r; use --format=json to preserve null entries and available metadata.', unavailable, label)
 
-	logging.info('Wrote file: ' + args.file)
-	try:
-		sanity_check(args.file, args.format, data if args.format == 'json' else sum(exported for _, exported, _ in summaries))
-	except (ExportError, OSError, ValueError, csv.Error) as err:
-		logging.warning('Sanity check failed: %s. The saved backup has been kept.', err)
-		parser.exit(1, 'Sanity check failed: {}. The saved backup has been kept.\n'.format(err))
-	else:
-		logging.info('Sanity check passed.')
+		logging.info('Wrote file: ' + args.file)
+		try:
+			sanity_check(args.file, args.format, data if args.format == 'json' else sum(exported for _, exported, _ in summaries))
+		except (ExportError, OSError, ValueError, csv.Error) as err:
+			logging.warning('Sanity check failed: %s. The saved backup has been kept.', err)
+			parser.exit(1, 'Sanity check failed: {}. The saved backup has been kept.\n'.format(err))
+		else:
+			logging.info('Sanity check passed.')
+	except Exception:
+		traceback.print_exc()
+		raise SystemExit(1)
+	finally:
+		if prompted:
+			pause()
 
 if __name__ == '__main__':
 	main()

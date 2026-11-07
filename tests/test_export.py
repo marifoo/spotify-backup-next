@@ -8,7 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from tests.test_auth import backup
 
@@ -149,9 +149,9 @@ class CLIFormatTests(unittest.TestCase):
     def test_blank_input_reprompts_and_eof_or_cancel_are_controlled(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.json'
-            with patch.object(backup.sys, 'argv', ['script', '--token=test']), patch('builtins.input', side_effect=['', '   ', str(path)]) as prompt, patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
+            with patch.object(backup.sys, 'argv', ['script', '--token=test']), patch('builtins.input', side_effect=['', '   ', str(path), '']) as prompt, patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
                 backup.main()
-            self.assertEqual(prompt.call_count, 3)
+            self.assertEqual(prompt.call_count, 4)
             self.assertEqual(json.loads(path.read_text()), {'user': 'tester', 'playlists': [], 'albums': []})
         for failure, code in ((EOFError(), 1), (KeyboardInterrupt(), 130)):
             with self.subTest(failure=type(failure)), patch.object(backup.sys, 'argv', ['script']), patch('builtins.input', side_effect=failure), patch.object(backup.SpotifyAPI, 'authorize') as authorize, patch.object(backup.sys, 'stderr', io.StringIO()):
@@ -159,6 +159,64 @@ class CLIFormatTests(unittest.TestCase):
                     backup.main()
                 self.assertEqual(error.exception.code, code)
                 authorize.assert_not_called()
+
+    def test_prompted_run_pauses_on_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['script', '--token=test']), \
+                    patch('builtins.input', side_effect=[str(path), '']) as prompt, \
+                    patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
+                backup.main()
+            self.assertEqual([call.args[0] for call in prompt.call_args_list],
+                             ['Enter a file name (e.g. playlists.txt): ', 'Press Enter to close...'])
+
+    def test_prompted_run_pauses_on_failure_exit(self):
+        with patch.object(backup.sys, 'argv', ['script']), \
+                patch('builtins.input', side_effect=['backup.custom', '']) as prompt, \
+                patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as error:
+                backup.main()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn('--format', stderr.getvalue())
+        self.assertEqual(prompt.call_args_list[-1].args[0], 'Press Enter to close...')
+
+    def test_prompted_run_prints_unexpected_error_before_pause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            stderr = io.StringIO()
+            prompts = []
+
+            def answer(message):
+                prompts.append((message, stderr.getvalue()))
+                return str(path) if len(prompts) == 1 else ''
+
+            with patch.object(backup.sys, 'argv', ['script', '--token=test']), \
+                    patch('builtins.input', side_effect=answer), \
+                    patch.object(backup, 'load_backup', side_effect=RuntimeError('broken checker')), \
+                    patch.object(backup.sys, 'stderr', stderr):
+                with self.assertRaises(SystemExit) as error:
+                    backup.main()
+            self.assertEqual(error.exception.code, 1)
+            self.assertEqual(prompts[-1][0], 'Press Enter to close...')
+            self.assertIn('RuntimeError: broken checker', prompts[-1][1])
+
+    def test_command_line_filename_never_pauses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), \
+                    patch('builtins.input', side_effect=AssertionError('unexpected pause')) as prompt, \
+                    patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
+                backup.main()
+            prompt.assert_not_called()
+
+    def test_pause_ignores_eof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['script', '--token=test']), \
+                    patch('builtins.input', side_effect=[str(path), EOFError()]) as prompt, \
+                    patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
+                backup.main()
+            self.assertEqual(prompt.call_count, 2)
 
 
 class AtomicWriteTests(unittest.TestCase):
