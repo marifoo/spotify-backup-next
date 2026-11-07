@@ -91,6 +91,79 @@ class PaginationTests(unittest.TestCase):
 
 
 class RequestTests(unittest.TestCase):
+    def test_get_refreshes_once_on_401_and_retries(self):
+        api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='old-refresh')
+        requests = []
+
+        def send(request, timeout):
+            requests.append(request)
+            if request.full_url.endswith('/api/token'):
+                return io.BytesIO(b'{"access_token":"new-access","refresh_token":"new-refresh"}')
+            if request.get_header('Authorization') == 'Bearer old-access':
+                raise self.http_error(status=401)
+            return io.BytesIO(b'{"ok":true}')
+
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=send), patch.object(backup.time, 'sleep') as sleep:
+            self.assertEqual(api.get('me'), {'ok': True})
+        self.assertEqual([request.get_header('Authorization') for request in requests if '/v1/' in request.full_url],
+                         ['Bearer old-access', 'Bearer new-access'])
+        self.assertEqual(api._refresh_token, 'new-refresh')
+        sleep.assert_not_called()
+
+    def test_get_second_401_after_refresh_fails(self):
+        api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='old-refresh')
+        calls = []
+
+        def send(request, timeout):
+            calls.append(request.full_url)
+            if request.full_url.endswith('/api/token'):
+                return io.BytesIO(b'{"access_token":"new-access"}')
+            raise self.http_error(status=401)
+
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=send), patch.object(backup.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(backup.ExportError, 'new --token'):
+                api.get('me')
+        self.assertEqual(len(calls), 3)
+        sleep.assert_not_called()
+
+    def test_get_refresh_failure_raises_export_error(self):
+        api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='old-refresh')
+
+        def send(request, timeout):
+            if request.full_url.endswith('/api/token'):
+                raise urllib.error.HTTPError(request.full_url, 400, 'old-refresh', {}, None)
+            raise self.http_error(status=401)
+
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=send) as mock_send:
+            with self.assertRaisesRegex(backup.ExportError, 'new --token') as error:
+                api.get('me')
+        self.assertEqual(mock_send.call_count, 2)
+        self.assertNotIn('old-refresh', str(error.exception))
+
+    def test_refresh_failure_does_not_leak_tokens(self):
+        api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='old-refresh')
+
+        def send(request, timeout):
+            if request.full_url.endswith('/api/token'):
+                raise urllib.error.HTTPError(request.full_url, 400, 'old-refresh', {}, None)
+            raise self.http_error(status=401)
+
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=send), \
+                patch.object(backup.logging, 'warning') as warning:
+            with self.assertRaises(backup.ExportError) as error:
+                api.get('me/old-access/old-refresh', {'secret': 'old-refresh'})
+        rendered = str(error.exception) + repr(warning.call_args_list)
+        self.assertNotIn('old-access', rendered)
+        self.assertNotIn('old-refresh', rendered)
+
+    def test_refresh_rotates_refresh_token(self):
+        api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='old-refresh')
+        with patch.object(backup.urllib.request, 'urlopen', return_value=io.BytesIO(
+                b'{"access_token":"new-access","refresh_token":"new-refresh"}')) as send:
+            api._refresh()
+        self.assertEqual((api._auth, api._refresh_token), ('new-access', 'new-refresh'))
+        self.assertEqual(urllib.parse.parse_qs(send.call_args.args[0].data.decode())['refresh_token'], ['old-refresh'])
+
     def test_read_token_is_not_forwarded_by_redirects(self):
         with patch.object(backup.urllib.request, 'urlopen', return_value=io.BytesIO(b'{}')) as send:
             backup.SpotifyAPI('secret-token').get('me')

@@ -165,26 +165,36 @@ def build_plan(data, source_user, followed='follow'):
 
 class WriteAPI(backup.SpotifyAPI):
     def write(self, method, endpoint, body=None, params=None):
-        """Send once: retrying a POST after a lost response can duplicate content."""
+        """Resend only after a confirmed 401 or 429 rejection."""
         url = self._url(endpoint, params)
-        request = urllib.request.Request(
-            url, method=method,
-            data=json.dumps(body).encode('utf-8') if body is not None else b'',
-            headers={'Content-Type': 'application/json'})
-        request.add_unredirected_header('Authorization', 'Bearer ' + self._auth)
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = response.read()
-                return json.loads(payload) if payload else None
-        except urllib.error.HTTPError as err:
-            status = err.code
-            err.close()
-            error = RejectedWrite if status in (400, 401, 403, 404, 429) else RestoreError
-            raise error('Spotify write failed (HTTP {}). Check permissions, access, '
-                        'or rate limits, then resume with the same state file.'.format(status)) from None
-        except (OSError, http.client.HTTPException, ValueError):
-            raise RestoreError('Write response was lost or invalid. Resume using the same state file; '
-                               'the operation may already have succeeded.') from None
+        refreshed = False
+        while True:
+            request = urllib.request.Request(
+                url, method=method,
+                data=json.dumps(body).encode('utf-8') if body is not None else b'',
+                headers={'Content-Type': 'application/json'})
+            request.add_unredirected_header('Authorization', 'Bearer ' + self._auth)
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    payload = response.read()
+                    return json.loads(payload) if payload else None
+            except urllib.error.HTTPError as err:
+                status = err.code
+                err.close()
+                if status == 401 and self._refresh_token and not refreshed:
+                    refreshed = True
+                    try:
+                        self._refresh()
+                    except self.AuthorizationError:
+                        pass
+                    else:
+                        continue
+                error = RejectedWrite if status in (400, 401, 403, 404, 429) else RestoreError
+                raise error('Spotify write failed (HTTP {}). Check permissions, access, '
+                            'or rate limits, then resume with the same state file.'.format(status)) from None
+            except (OSError, http.client.HTTPException, ValueError):
+                raise RestoreError('Write response was lost or invalid. Resume using the same state file; '
+                                   'the operation may already have succeeded.') from None
 
 
 def save_state(path, state):

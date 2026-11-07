@@ -307,6 +307,39 @@ class RestoreTests(unittest.TestCase):
             request, None, 302, 'Found', {}, 'http://collector.invalid/capture')
         self.assertIsNone(redirected.get_header('Authorization'))
 
+    def test_write_refreshes_once_on_401(self):
+        api = restore.WriteAPI('old-access', client_id='client', refresh_token='old-refresh')
+        requests = []
+
+        def send(request, timeout):
+            requests.append(request)
+            if request.full_url.endswith('/api/token'):
+                return io.BytesIO(b'{"access_token":"new-access"}')
+            if request.get_header('Authorization') == 'Bearer old-access':
+                raise urllib.error.HTTPError(request.full_url, 401, 'expired', {}, None)
+            return io.BytesIO(b'{"id":"created"}')
+
+        with patch.object(restore.urllib.request, 'urlopen', side_effect=send):
+            self.assertEqual(api.write('POST', 'me/playlists', {'name': 'Test'}), {'id': 'created'})
+        self.assertEqual([request.get_header('Authorization') for request in requests if '/v1/' in request.full_url],
+                         ['Bearer old-access', 'Bearer new-access'])
+
+    def test_write_refresh_failure_is_rejected_write_and_clears_creating_marker(self):
+        plan = restore.build_plan(data(playlist()), 'old')
+        api = FakeAPI()
+        writer = restore.WriteAPI('old-access', client_id='client', refresh_token='old-refresh')
+
+        def send(request, timeout):
+            status = 400 if request.full_url.endswith('/api/token') else 401
+            raise urllib.error.HTTPError(request.full_url, status, 'sensitive', {}, None)
+
+        with patch.object(restore.urllib.request, 'urlopen', side_effect=send) as mock_send, \
+                patch.object(api, 'write', side_effect=writer.write):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, plan)
+        self.assertEqual(mock_send.call_count, 2)
+        self.assertNotIn('creating', json.loads(self.state.read_text())['actions']['0'])
+
     def test_malformed_destination_items_stop_before_appending(self):
         plan = restore.build_plan(data(playlist()), 'old')
         api = FakeAPI()

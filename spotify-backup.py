@@ -58,12 +58,11 @@ class SpotifyAPI:
 		url = self._url(url, params)
 		# Log the endpoint without query values or exception text, which can
 		# contain credentials supplied by a server, proxy, or HTTP library.
-		resource = urllib.parse.urlsplit(url).path
-		if self._auth:
-			resource = resource.replace(self._auth, '[redacted]')
+		resource_path = urllib.parse.urlsplit(url).path
 	
-		# Try the sending off the request a specified number of times before giving up.
-		for attempt in range(tries):
+		attempt, refreshed = 0, False
+		while attempt < tries:
+			attempt += 1
 			delay = 2
 			try:
 				req = urllib.request.Request(url)
@@ -75,6 +74,15 @@ class SpotifyAPI:
 			except urllib.error.HTTPError as err:
 				try:
 					status = err.code
+					if status == 401 and self._refresh_token and not refreshed:
+						refreshed = True
+						try:
+							self._refresh()
+						except self.AuthorizationError:
+							pass
+						else:
+							attempt -= 1
+							continue
 					retry = status in (408, 429) or 500 <= status < 600
 					guidance = {
 						401: 'Token expired or invalid. Run again to log in, or supply a new --token.',
@@ -100,8 +108,11 @@ class SpotifyAPI:
 			except ValueError:
 				retry = False
 				message = 'Spotify returned invalid JSON or response encoding. Please retry.'
+			resource = resource_path
+			for credential in self._credentials:
+				resource = resource.replace(credential, '[redacted]')
 			logging.warning('Could not load %s: %s', resource, message)
-			if not retry or attempt + 1 == tries:
+			if not retry or attempt == tries:
 				raise ExportError('Could not load {}: {}'.format(resource, message)) from None
 			logging.info('Trying again in %s seconds...', delay)
 			time.sleep(delay)
@@ -211,6 +222,17 @@ class SpotifyAPI:
 		if not isinstance(result, dict) or not isinstance(result.get('access_token'), str) or not result['access_token']:
 			raise SpotifyAPI.AuthorizationError('Spotify did not return an access token. Please retry login.')
 		return result
+
+	def _refresh(self):
+		token = self._token_request({
+			'grant_type': 'refresh_token', 'refresh_token': self._refresh_token,
+			'client_id': self._client_id
+		})
+		self._auth = token['access_token']
+		self._credentials.add(self._auth)
+		if isinstance(token.get('refresh_token'), str) and token['refresh_token']:
+			self._refresh_token = token['refresh_token']
+			self._credentials.add(self._refresh_token)
 
 	_SERVER_PORT = 43019
 
