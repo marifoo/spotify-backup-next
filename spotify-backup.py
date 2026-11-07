@@ -316,8 +316,16 @@ def load_playlist(spotify, playlist):
 	return result
 
 
+def dump_selection(value):
+	parts = value.split(',')
+	selected = frozenset(parts)
+	if (not parts or any(not part or part not in {'liked', 'playlists', 'own-playlists'} for part in parts)
+	        or {'playlists', 'own-playlists'} <= selected):
+		raise argparse.ArgumentTypeError('Choose liked, playlists, or own-playlists without combining both playlist selections.')
+	return selected
+
+
 def load_backup(spotify, dump):
-	dump = set(dump.split(','))
 	logging.info('Loading user info...')
 	me = spotify.get('me')
 	if not isinstance(me, dict) or not isinstance(me.get('id'), str) or not me['id']:
@@ -520,9 +528,7 @@ def main():
 	parser.add_argument('--token', metavar='OAUTH_TOKEN', help='use a Spotify OAuth token; playlists require '
 	                    'playlist-read-private and playlist-read-collaborative; liked songs and albums '
 	                    'require user-library-read')
-	parser.add_argument('--dump', metavar='COLLECTIONS', default='playlists',
-	                    choices=['liked,playlists', 'playlists,liked', 'playlists', 'liked',
-	                             'own-playlists', 'liked,own-playlists', 'own-playlists,liked'],
+	parser.add_argument('--dump', metavar='COLLECTIONS', default='playlists', type=dump_selection,
 	                    help='choose collections to back up (default: playlists); see selections below')
 	parser.add_argument('--format', choices=['json', 'txt'], help='output format (default: infer from .json/.txt/.tsv; txt without an extension)')
 	parser.add_argument('--client-id', default=os.environ.get('SPOTIFY_CLIENT_ID'),

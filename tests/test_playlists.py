@@ -12,6 +12,19 @@ from tests.test_auth import backup
 
 
 class PlaylistSelectionTests(unittest.TestCase):
+    def test_dump_selection_accepts_any_order_and_rejects_conflicts(self):
+        for value, selected in (
+            ('liked', {'liked'}), ('playlists', {'playlists'}), ('own-playlists', {'own-playlists'}),
+            ('liked,playlists', {'liked', 'playlists'}), ('playlists,liked', {'liked', 'playlists'}),
+            ('liked,own-playlists', {'liked', 'own-playlists'}),
+            ('own-playlists,liked', {'liked', 'own-playlists'}), ('liked,liked', {'liked'}),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(backup.dump_selection(value), frozenset(selected))
+        for value in ('', 'foo', 'playlists,own-playlists'):
+            with self.subTest(value=value), self.assertRaises(backup.argparse.ArgumentTypeError):
+                backup.dump_selection(value)
+
     def test_cli_own_selection_filters_all_pages_before_loading_contents(self):
         for selection in ('own-playlists', 'liked,own-playlists', 'own-playlists,liked'):
             for output_format in ('txt', 'json'):
@@ -69,7 +82,7 @@ class PlaylistSelectionTests(unittest.TestCase):
             {'id': 'collaborative', 'name': 'Collaborative', 'owner': {'id': 'other'}, 'collaborative': True, 'tracks': {'href': 'collaborative'}},
         ]
         spotify.list.side_effect = [playlists, [], [], []]
-        result, albums = backup.load_backup(spotify, 'playlists')
+        result, albums = backup.load_backup(spotify, backup.dump_selection('playlists'))
         self.assertEqual([playlist['name'] for playlist in result], ['Own', 'Followed', 'Collaborative'])
         self.assertEqual(albums, [])
         self.assertEqual(spotify.list.call_args_list, [call('me/playlists', {'limit': 50})] + [
@@ -80,7 +93,7 @@ class PlaylistSelectionTests(unittest.TestCase):
         spotify = Mock()
         spotify.get.return_value = {'id': 'tester'}
         spotify.list.return_value = [{'name': 'Followed', 'owner': {'id': 'other'}}]
-        self.assertEqual(backup.load_backup(spotify, 'own-playlists'), ([], []))
+        self.assertEqual(backup.load_backup(spotify, backup.dump_selection('own-playlists')), ([], []))
         spotify.list.assert_called_once_with('me/playlists', {'limit': 50})
 
     def test_invalid_owner_stops_own_export_and_preserves_previous_backup(self):
@@ -310,7 +323,7 @@ class PlaylistCompatibilityTests(unittest.TestCase):
         spotify.list.side_effect = [self.entries, albums,
                                    [{'id': 'playlist', 'name': 'Playlist', 'items': {'href': 'new', 'total': 4}}],
                                    self.entries_for('item')]
-        playlists, result_albums = backup.load_backup(spotify, 'liked,playlists')
+        playlists, result_albums = backup.load_backup(spotify, backup.dump_selection('liked,playlists'))
         self.assertEqual(playlists, [{'name': 'Liked Songs', 'tracks': self.entries},
                                     {'id': 'playlist', 'name': 'Playlist', 'snapshot_id': 'version', 'tracks': self.entries}])
         self.assertEqual(result_albums, albums)
@@ -386,12 +399,12 @@ class PlaylistCompatibilityTests(unittest.TestCase):
         spotify = Mock()
         spotify.get.return_value = {'id': 'tester', 'display_name': None}
         spotify.list.return_value = []
-        self.assertEqual(backup.load_backup(spotify, 'playlists'), ([], []))
+        self.assertEqual(backup.load_backup(spotify, backup.dump_selection('playlists')), ([], []))
         for profile in (None, {}, {'id': []}):
             with self.subTest(profile=profile):
                 spotify.get.return_value = profile
                 with self.assertRaises(backup.ExportError):
-                    backup.load_backup(spotify, 'playlists')
+                    backup.load_backup(spotify, backup.dump_selection('playlists'))
 
     def test_malformed_playlist_and_media_fail_cleanly(self):
         spotify = Mock()
