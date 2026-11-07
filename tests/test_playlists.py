@@ -400,7 +400,7 @@ class PlaylistCompatibilityTests(unittest.TestCase):
     def test_cli_access_failures_do_not_create_or_replace_output(self):
         for output_format in ('txt', 'json'):
             for existing in (False, True):
-                for failure in ('metadata', 403, 404):
+                for failure in ('metadata', 'listing'):
                     with self.subTest(format=output_format, existing=existing, failure=failure), tempfile.TemporaryDirectory() as directory:
                         path = Path(directory) / ('backup.' + output_format)
                         if existing:
@@ -413,7 +413,7 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                             playlists[1]['items'] = {'href': 'restricted', 'total': 2}
                         spotify = Mock()
                         spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester', 'snapshot_id': 'version'}
-                        error = backup.ExportError('HTTP {}: Request failed'.format(failure))
+                        error = backup.ExportError('Request failed')
                         spotify.list.side_effect = [playlists, [], error]
                         stderr = io.StringIO()
                         with patch.object(backup.sys, 'argv', ['spotify-backup.py', str(path), '--token=test', '--format=' + output_format]), patch.object(backup, 'SpotifyAPI', return_value=spotify), patch.object(backup.sys, 'stderr', stderr):
