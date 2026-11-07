@@ -102,7 +102,6 @@ class SpotifyAPI:
 				raise ExportError('Could not load {}: {}'.format(resource, message)) from None
 			logging.info('Trying again in %s seconds...', delay)
 			time.sleep(delay)
-		raise ExportError('Could not load {}: no request attempts available.'.format(resource))
 	
 	# The Spotify API breaks long lists into multiple pages. This method automatically
 	# fetches all pages and joins them, returning in a single list of objects.
@@ -119,7 +118,7 @@ class SpotifyAPI:
 			if page_key in visited:
 				raise ExportError('Cannot export {}: Spotify repeated a pagination URL. Please retry.'.format(resource))
 			visited.add(page_key)
-			response = self.get(url, params) if params else self.get(url)
+			response = self.get(url, params)
 			if (not isinstance(response, dict) or not isinstance(response.get('items'), list)
 			        or any(not isinstance(item, dict) for item in response['items'])
 			        or 'next' not in response
@@ -255,7 +254,7 @@ def artist_names(artists):
 
 def validate_entries(entries, field, label):
 	for entry in entries:
-		media = entry.get(field) if isinstance(entry, dict) else False
+		media = entry.get(field)
 		if media is None:
 			continue
 		objects = [media]
@@ -282,7 +281,7 @@ def playlist_snapshot(spotify, playlist_id):
 
 
 def load_playlist(spotify, playlist):
-	if not isinstance(playlist, dict) or not isinstance(playlist.get('name'), str):
+	if not isinstance(playlist.get('name'), str):
 		raise ExportError('Spotify returned malformed playlist metadata.')
 	label = '"{}" ({})'.format(playlist['name'], playlist.get('id', 'unknown ID'))
 	# Both fields can occur during Spotify's migration; prefer the current endpoint.
@@ -309,8 +308,6 @@ def load_playlist(spotify, playlist):
 	result.pop('items', None)
 	result['tracks'] = []
 	for entry in entries:
-		if not isinstance(entry, dict):
-			raise ExportError('Cannot export playlist {}: Spotify returned a malformed entry.'.format(label))
 		entry = dict(entry)
 		if 'item' in entry:
 			entry['track'] = entry.pop('item')
@@ -342,7 +339,7 @@ def load_backup(spotify, dump):
 		if 'own-playlists' in dump:
 			owned = []
 			for playlist in playlist_data:
-				owner = playlist.get('owner') if isinstance(playlist, dict) else None
+				owner = playlist.get('owner')
 				if not isinstance(owner, dict) or not isinstance(owner.get('id'), str) or not owner['id']:
 					raise ExportError('Cannot select own playlists: Spotify returned missing or invalid playlist owner information.')
 				if owner['id'] == me['id']:

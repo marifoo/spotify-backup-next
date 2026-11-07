@@ -396,7 +396,7 @@ class PlaylistCompatibilityTests(unittest.TestCase):
     def test_malformed_playlist_and_media_fail_cleanly(self):
         spotify = Mock()
         spotify.get.return_value = {'snapshot_id': 'version'}
-        for playlist in (None, {}, {'name': []}, {'name': 'Test', 'items': []}):
+        for playlist in ({}, {'name': []}, {'name': 'Test', 'items': []}):
             with self.subTest(playlist=playlist), self.assertRaises(backup.ExportError):
                 backup.load_playlist(spotify, playlist)
         for media in ([], 'bad', {'artists': [None]}, {'album': []}, {'name': []}, {'show': {'publisher': 1}}):

@@ -22,7 +22,7 @@ class PaginationTests(unittest.TestCase):
                 with self.assertLogs(level='WARNING') as logs:
                     result = backup.SpotifyAPI('token').list(resource, {'limit': 50})
                 self.assertEqual(result, playlists)
-                self.assertEqual(get.call_args_list, [call(resource, {'limit': 50})] + [call(url) for url in next_urls])
+                self.assertEqual(get.call_args_list, [call(resource, {'limit': 50})] + [call(url, None) for url in next_urls])
                 self.assertEqual(len(logs.output), 1)
                 self.assertIn('277', logs.output[0])
                 self.assertIn('278', logs.output[0])
