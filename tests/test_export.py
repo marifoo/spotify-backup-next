@@ -3,7 +3,9 @@ from contextlib import contextmanager
 import csv
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -26,7 +28,7 @@ class ExportSummaryTests(unittest.TestCase):
                      {'name': 'Empty', 'tracks': []}]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.txt'
-            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value=(playlists, [])), self.assertLogs(level='INFO') as logs:
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': playlists, 'albums': []}), self.assertLogs(level='INFO') as logs:
                 backup.main()
             messages = '\n'.join(logs.output)
             self.assertIn("'Unavailable': exported 0 entries, unavailable 2", messages)
@@ -42,16 +44,16 @@ class ExportSummaryTests(unittest.TestCase):
         albums = [{'album': None}]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.json'
-            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value=(playlists, albums)), self.assertLogs(level='INFO') as logs:
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': playlists, 'albums': albums}), self.assertLogs(level='INFO') as logs:
                 backup.main()
-            self.assertEqual(json.loads(path.read_text()), {'playlists': playlists, 'albums': albums})
+            self.assertEqual(json.loads(path.read_text()), {'user': 'tester', 'playlists': playlists, 'albums': albums})
             self.assertFalse(any('omitted' in record.getMessage() for record in logs.records))
 
     def test_failed_save_does_not_report_entries_as_exported(self):
         playlists = [{'name': 'Unavailable', 'tracks': [{'track': None}]}]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.txt'
-            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value=(playlists, [])), patch.object(backup.os, 'replace', side_effect=OSError('disk full')), patch.object(backup.sys, 'stderr', io.StringIO()), self.assertLogs(level='INFO') as logs:
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': playlists, 'albums': []}), patch.object(backup.os, 'replace', side_effect=OSError('disk full')), patch.object(backup.sys, 'stderr', io.StringIO()), self.assertLogs(level='INFO') as logs:
                 with self.assertRaises(SystemExit):
                     backup.main()
             self.assertFalse(any('TXT collection' in record.getMessage() or 'TXT omitted' in record.getMessage() for record in logs.records))
@@ -103,7 +105,7 @@ class OutputPathTests(unittest.TestCase):
                 with self.subTest(format=output_format, failure=type(failure)), tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / 'backup'
                     path.write_bytes(b'previous backup')
-                    with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test', '--format=' + output_format]), patch.object(backup, 'load_backup', return_value=([], [])), patch.object(backup.os, 'replace', side_effect=failure), patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
+                    with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test', '--format=' + output_format]), patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}), patch.object(backup.os, 'replace', side_effect=failure), patch.object(backup.sys, 'stderr', io.StringIO()) as stderr:
                         with self.assertRaises(SystemExit) as error:
                             backup.main()
                         self.assertEqual(error.exception.code, 1)
@@ -128,10 +130,10 @@ class CLIFormatTests(unittest.TestCase):
                     argv = ['script', '--token=test'] + ([] if prompted else [str(path)])
                     if explicit:
                         argv += ['--format=' + explicit]
-                    with patch.object(backup.sys, 'argv', argv), patch('builtins.input', return_value=str(path)), patch.object(backup, 'load_backup', return_value=([], [])):
+                    with patch.object(backup.sys, 'argv', argv), patch('builtins.input', return_value=str(path)), patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
                         backup.main()
                     if expected == 'json':
-                        self.assertEqual(json.loads(path.read_text()), {'playlists': [], 'albums': []})
+                        self.assertEqual(json.loads(path.read_text()), {'user': 'tester', 'playlists': [], 'albums': []})
                     else:
                         self.assertEqual(path.read_bytes(), b'Playlists: \r\n\r\n')
 
@@ -147,10 +149,10 @@ class CLIFormatTests(unittest.TestCase):
     def test_blank_input_reprompts_and_eof_or_cancel_are_controlled(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.json'
-            with patch.object(backup.sys, 'argv', ['script', '--token=test']), patch('builtins.input', side_effect=['', '   ', str(path)]) as prompt, patch.object(backup, 'load_backup', return_value=([], [])):
+            with patch.object(backup.sys, 'argv', ['script', '--token=test']), patch('builtins.input', side_effect=['', '   ', str(path)]) as prompt, patch.object(backup, 'load_backup', return_value={'user': 'tester', 'playlists': [], 'albums': []}):
                 backup.main()
             self.assertEqual(prompt.call_count, 3)
-            self.assertEqual(json.loads(path.read_text()), {'playlists': [], 'albums': []})
+            self.assertEqual(json.loads(path.read_text()), {'user': 'tester', 'playlists': [], 'albums': []})
         for failure, code in ((EOFError(), 1), (KeyboardInterrupt(), 130)):
             with self.subTest(failure=type(failure)), patch.object(backup.sys, 'argv', ['script']), patch('builtins.input', side_effect=failure), patch.object(backup.SpotifyAPI, 'authorize') as authorize, patch.object(backup.sys, 'stderr', io.StringIO()):
                 with self.assertRaises(SystemExit) as error:
@@ -160,6 +162,28 @@ class CLIFormatTests(unittest.TestCase):
 
 
 class AtomicWriteTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes only')
+    def test_replace_preserves_existing_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            path.write_bytes(b'old')
+            path.chmod(0o644)
+            backup.write_backup(path, 'json', {'user': 'tester', 'playlists': [], 'albums': []})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+
+    def test_symlink_destination_writes_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'target.json'
+            link = Path(directory) / 'link.json'
+            target.write_bytes(b'old')
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest('symlinks unavailable')
+            backup.write_backup(link, 'json', {'user': 'tester', 'playlists': [], 'albums': []})
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(json.loads(target.read_text()), {'user': 'tester', 'playlists': [], 'albums': []})
+
     def test_write_failures_preserve_previous_backup_and_remove_temporary_file(self):
         for output_format in ('txt', 'json'):
             for existing in (False, True):
@@ -177,7 +201,7 @@ class AtomicWriteTests(unittest.TestCase):
                         target, name = (backup.json, 'dump') if output_format == 'json' else (backup, 'write_txt')
                         with patch.object(target, name, side_effect=fail):
                             with self.assertRaises(type(error)):
-                                backup.write_backup(path, output_format, [], [])
+                                backup.write_backup(path, output_format, {'user': 'tester', 'playlists': [], 'albums': []})
                         self.assertEqual(path.read_bytes() if existing else path.exists(),
                                          b'previous backup' if existing else False)
                         self.assertEqual(list(Path(directory).iterdir()), [path] if existing else [])
@@ -203,7 +227,7 @@ class AtomicWriteTests(unittest.TestCase):
                         else:
                             fault = patch.object(backup.os, 'fsync' if failure == 'sync' else 'replace', side_effect=OSError(failure))
                         with fault, self.assertRaises(OSError):
-                            backup.write_backup(path, output_format, [], [])
+                            backup.write_backup(path, output_format, {'user': 'tester', 'playlists': [], 'albums': []})
                         self.assertEqual(path.read_bytes() if existing else path.exists(),
                                          b'previous backup' if existing else False)
                         self.assertEqual(list(Path(directory).iterdir()), [path] if existing else [])
@@ -213,7 +237,7 @@ class AtomicWriteTests(unittest.TestCase):
             path = Path(directory) / 'backup.json'
             path.write_bytes(b'previous backup')
             with self.assertRaises(TypeError):
-                backup.write_backup(path, 'json', [{'unsupported': object()}], [])
+                backup.write_backup(path, 'json', {'user': 'tester', 'playlists': [{'unsupported': object()}], 'albums': []})
             self.assertEqual(path.read_bytes(), b'previous backup')
             self.assertEqual(list(Path(directory).iterdir()), [path])
 
@@ -222,9 +246,9 @@ class AtomicWriteTests(unittest.TestCase):
             with self.subTest(format=output_format), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / 'backup'
                 path.write_bytes(b'previous backup')
-                backup.write_backup(path, output_format, [], [])
+                backup.write_backup(path, output_format, {'user': 'tester', 'playlists': [], 'albums': []})
                 if output_format == 'json':
-                    self.assertEqual(json.loads(path.read_text()), {'playlists': [], 'albums': []})
+                    self.assertEqual(json.loads(path.read_text()), {'user': 'tester', 'playlists': [], 'albums': []})
                 else:
                     self.assertEqual(path.read_bytes(), b'Playlists: \r\n\r\n')
                 self.assertEqual(list(Path(directory).iterdir()), [path])
@@ -255,13 +279,17 @@ class TextExportTests(unittest.TestCase):
                 self.assertEqual((playlists, albums), original)
                 with tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / 'backup.json'
-                    backup.write_backup(path, 'json', playlists, albums)
+                    backup.write_backup(path, 'json', {'user': 'tester', 'playlists': playlists, 'albums': albums})
                     self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
-                                     {'playlists': original[0], 'albums': original[1]})
+                                     {'user': 'tester', 'playlists': original[0], 'albums': original[1]})
 
     def test_cli_writes_single_crlf_separators(self):
         spotify = Mock()
-        spotify.get.side_effect = [{'display_name': 'Tester', 'id': 'tester'}, {'id': '1'}]
+        spotify.get.side_effect = [
+            {'display_name': 'Tester', 'id': 'tester'},
+            {'items': [{'track': {'uri': 'spotify:track:1'}}], 'total': 1},
+            {'items': [{'album': {'uri': 'spotify:album:2'}}], 'total': 1},
+        ]
         spotify.list.side_effect = [
             [{'track': {'name': 'Song', 'artists': [{'name': 'Singer'}],
                         'album': {'name': 'Album'}, 'uri': 'spotify:track:1'}}],
@@ -279,16 +307,20 @@ class TextExportTests(unittest.TestCase):
 
     def test_json_file_keeps_original_structure(self):
         spotify = Mock()
-        spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester'}
         tracks = [{'track': {'name': 'Song\t"quoted"\r\nnext'}}]
         albums = [{'album': {'name': 'Saved\t"quoted"\r\nnext'}}]
+        spotify.get.side_effect = [
+            {'display_name': 'Tester', 'id': 'tester'},
+            {'items': tracks, 'total': len(tracks)},
+            {'items': albums, 'total': len(albums)},
+        ]
         spotify.list.side_effect = [tracks, albums]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'backup.json'
             with patch.object(backup.sys, 'argv', ['spotify-backup.py', str(path), '--token=test', '--dump=liked', '--format=json']), patch.object(backup, 'SpotifyAPI', return_value=spotify):
                 backup.main()
             self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
-                             {'playlists': [{'name': 'Liked Songs', 'tracks': tracks}], 'albums': albums})
+                             {'user': 'tester', 'playlists': [{'name': 'Liked Songs', 'tracks': tracks}], 'albums': albums})
 
     def render(self, tracks, albums=None):
         output = io.StringIO()

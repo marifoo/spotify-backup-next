@@ -22,7 +22,7 @@ def playlist(name='Own', owner='old', ids=('a', 'b', 'a')):
 
 
 def data(*playlists):
-    return dict(playlists=list(playlists), albums=[])
+    return dict(user='old', playlists=list(playlists), albums=[])
 
 
 class FakeAPI:
@@ -60,13 +60,43 @@ class RestoreTests(unittest.TestCase):
         with patch('sys.stdout', new=io.StringIO()):
             restore.execute_plan(api, plan, target, self.state)
 
+    def test_source_user_defaults_to_backup_user(self):
+        plan = restore.build_plan(data(playlist()))
+        self.assertTrue(plan[0]['owned'])
+        self.assertEqual(plan[0]['kind'], 'copy')
+
+    def test_flag_differing_from_backup_user_is_rejected(self):
+        with self.assertRaisesRegex(restore.RestoreError, 'differs'):
+            restore.build_plan(data(playlist()), 'typo')
+
+    def test_missing_or_non_string_source_user_is_rejected(self):
+        for value in (None, '', 123):
+            with self.subTest(value=value):
+                source = data(playlist())
+                if value is None:
+                    source.pop('user')
+                else:
+                    source['user'] = value
+                with self.assertRaisesRegex(restore.RestoreError, 'Supply --source-user'):
+                    restore.build_plan(source)
+
+    def test_legacy_flag_matching_no_owner_is_rejected_with_recovery_hint(self):
+        source = data(playlist(owner='other'))
+        source.pop('user')
+        with self.assertRaisesRegex(restore.RestoreError, '"user"'):
+            restore.build_plan(source, 'typo')
+
+    def test_backup_without_owned_playlists_accepts_backup_user(self):
+        plan = restore.build_plan(data(playlist(owner='other')))
+        self.assertEqual(plan[0]['kind'], 'follow')
+
     def test_owned_followed_collaborative_and_liked_name_collision(self):
         followed = playlist('Shared', owner='other')
         followed['collaborative'] = True
         source = data(playlist(), followed, playlist('Liked Songs'),
                       {'name': 'Liked Songs', 'tracks': tracks('liked')})
         source['albums'] = [{'album': {'uri': 'spotify:album:album1'}}]
-        plan = restore.build_plan(source, 'old')
+        plan = restore.build_plan(source)
         self.assertEqual([a['kind'] for a in plan], ['copy', 'follow', 'copy', 'library', 'library'])
         self.assertEqual(plan[0]['uris'], ['spotify:track:a', 'spotify:track:b', 'spotify:track:a'])
         for policy in ('copy', 'skip'):
@@ -206,7 +236,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_follow_original_and_save_library_in_40_item_batches(self):
         source = data(playlist(owner='other'), {'name': 'Liked Songs', 'tracks': tracks(*map(str, range(81)))})
-        plan = restore.build_plan(source, 'old')
+        plan = restore.build_plan(source)
         api = FakeAPI()
         self.run_plan(api, plan)
         self.assertEqual(api.writes[0], ('PUT', 'me/library', None, {'uris': 'spotify:playlist:original'}))

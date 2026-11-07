@@ -12,6 +12,17 @@ from tests.test_auth import backup
 
 
 class PlaylistSelectionTests(unittest.TestCase):
+    def test_json_records_source_user(self):
+        spotify = Mock()
+        spotify.get.return_value = {'id': 'source', 'display_name': 'Source'}
+        spotify.list.return_value = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test']), \
+                    patch.object(backup, 'SpotifyAPI', return_value=spotify):
+                backup.main()
+            self.assertEqual(json.loads(path.read_text())['user'], 'source')
+
     def test_dump_selection_accepts_any_order_and_rejects_conflicts(self):
         for value, selected in (
             ('liked', {'liked'}), ('playlists', {'playlists'}), ('own-playlists', {'own-playlists'}),
@@ -24,6 +35,46 @@ class PlaylistSelectionTests(unittest.TestCase):
         for value in ('', 'foo', 'playlists,own-playlists'):
             with self.subTest(value=value), self.assertRaises(backup.argparse.ArgumentTypeError):
                 backup.dump_selection(value)
+
+    def test_library_unchanged_passes(self):
+        entries = [{'added_at': '2024-01-01', 'track': {'uri': 'spotify:track:a'}}]
+        spotify = Mock()
+        spotify.list.return_value = entries
+        spotify.get.return_value = {'items': entries, 'total': 1}
+        self.assertEqual(backup.load_library(spotify, 'me/tracks', 'track', 'Liked Songs'), entries)
+        spotify.get.assert_called_once_with('me/tracks', {'limit': 50})
+
+    def test_library_addition_during_download_fails(self):
+        entries = [{'added_at': '2024-01-01', 'track': {'uri': 'spotify:track:a'}}]
+        spotify = Mock(list=Mock(return_value=entries), get=Mock(return_value={
+            'items': [{'added_at': '2024-01-02', 'track': {'uri': 'spotify:track:b'}}], 'total': 1}))
+        with self.assertRaisesRegex(backup.ExportError, 'Liked Songs changed'):
+            backup.load_library(spotify, 'me/tracks', 'track', 'Liked Songs')
+
+    def test_library_removal_during_download_fails(self):
+        spotify = Mock(list=Mock(return_value=[{'album': {'uri': 'spotify:album:a'}}]),
+                       get=Mock(return_value={'items': [], 'total': 0}))
+        with self.assertRaisesRegex(backup.ExportError, 'Liked Albums changed'):
+            backup.load_library(spotify, 'me/albums', 'album', 'Liked Albums')
+
+    def test_library_malformed_recheck_page_fails(self):
+        spotify = Mock(list=Mock(return_value=[]), get=Mock(return_value={'items': [], 'total': 'bad'}))
+        with self.assertRaisesRegex(backup.ExportError, 'Liked Songs changed'):
+            backup.load_library(spotify, 'me/tracks', 'track', 'Liked Songs')
+
+    def test_library_recheck_failure_preserves_existing_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'backup.json'
+            path.write_bytes(b'previous backup')
+            spotify = Mock()
+            spotify.get.side_effect = [{'id': 'tester'}, {'items': [], 'total': 0}]
+            spotify.list.return_value = [{'track': {'uri': 'spotify:track:a'}}]
+            with patch.object(backup.sys, 'argv', ['script', str(path), '--token=test', '--dump=liked']), \
+                    patch.object(backup, 'SpotifyAPI', return_value=spotify), \
+                    patch.object(backup.sys, 'stderr', io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    backup.main()
+            self.assertEqual(path.read_bytes(), b'previous backup')
 
     def test_cli_own_selection_filters_all_pages_before_loading_contents(self):
         for selection in ('own-playlists', 'liked,own-playlists', 'own-playlists,liked'):
@@ -45,8 +96,8 @@ class PlaylistSelectionTests(unittest.TestCase):
                             'me/playlists?offset=50': {'items': [collaborative, own_last], 'total': 5, 'next': None},
                             'playlists/first/items': {'items': [{'item': {'name': 'First song'}}], 'next': None},
                             'playlists/last/tracks': {'items': [{'track': {'name': 'Last song'}}], 'next': None},
-                            'me/tracks': {'items': [{'track': {'name': 'Liked song'}}], 'next': None},
-                            'me/albums': {'items': [{'album': {'name': 'Saved album'}}], 'next': None},
+                            'me/tracks': {'items': [{'track': {'name': 'Liked song'}}], 'total': 1, 'next': None},
+                            'me/albums': {'items': [{'album': {'name': 'Saved album'}}], 'total': 1, 'next': None},
                         }[url]
 
                     path = Path(directory) / ('backup.' + output_format)
@@ -82,7 +133,9 @@ class PlaylistSelectionTests(unittest.TestCase):
             {'id': 'collaborative', 'name': 'Collaborative', 'owner': {'id': 'other'}, 'collaborative': True, 'tracks': {'href': 'collaborative'}},
         ]
         spotify.list.side_effect = [playlists, [], [], []]
-        result, albums = backup.load_backup(spotify, backup.dump_selection('playlists'))
+        result = backup.load_backup(spotify, backup.dump_selection('playlists'))
+        albums = result['albums']
+        result = result['playlists']
         self.assertEqual([playlist['name'] for playlist in result], ['Own', 'Followed', 'Collaborative'])
         self.assertEqual(albums, [])
         self.assertEqual(spotify.list.call_args_list, [call('me/playlists', {'limit': 50})] + [
@@ -93,7 +146,8 @@ class PlaylistSelectionTests(unittest.TestCase):
         spotify = Mock()
         spotify.get.return_value = {'id': 'tester'}
         spotify.list.return_value = [{'name': 'Followed', 'owner': {'id': 'other'}}]
-        self.assertEqual(backup.load_backup(spotify, backup.dump_selection('own-playlists')), ([], []))
+        self.assertEqual(backup.load_backup(spotify, backup.dump_selection('own-playlists')),
+                         {'user': 'tester', 'playlists': [], 'albums': []})
         spotify.list.assert_called_once_with('me/playlists', {'limit': 50})
 
     def test_invalid_owner_stops_own_export_and_preserves_previous_backup(self):
@@ -294,8 +348,6 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                             'items': entries[:2], 'next': entries_next}
                     elif url.path == '/v1/playlists/empty/' + collection_field:
                         data = {'items': [], 'next': None}
-                    elif url.path == '/v1/tracks/1':
-                        data = {'id': '1'}
                     else:
                         self.fail('Unexpected request: ' + request.full_url)
                     return io.BytesIO(json.dumps(data).encode('utf-8'))
@@ -305,6 +357,7 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                     with patch.object(backup.sys, 'argv', ['spotify-backup.py', str(path), '--token=test', '--format=json']), patch.object(backup.urllib.request, 'urlopen', side_effect=respond) as send:
                         backup.main()
                     self.assertEqual(json.loads(path.read_text(encoding='utf-8')), {
+                        'user': 'tester',
                         'playlists': [
                             {'id': 'playlist', 'name': 'Playlist', 'snapshot_id': 'version', 'tracks': self.entries},
                             {'id': 'empty', 'name': 'Empty', 'snapshot_id': 'version', 'tracks': []}],
@@ -313,17 +366,22 @@ class PlaylistCompatibilityTests(unittest.TestCase):
                 urls = [request.args[0].full_url for request in send.call_args_list]
                 self.assertIn(playlist_next, urls)
                 self.assertIn(entries_next, urls)
-                self.assertEqual(urls[-1], 'https://api.spotify.com/v1/tracks/1')
-                self.assertEqual(len(urls), 11)
+                self.assertEqual(len(urls), 10)
 
     def test_combined_export_keeps_liked_songs_and_albums(self):
         spotify = Mock()
-        spotify.get.return_value = {'display_name': 'Tester', 'id': 'tester', 'snapshot_id': 'version'}
         albums = [{'album': {'name': 'Saved'}}]
+        spotify.get.side_effect = lambda endpoint, params=None: {
+            'me': {'display_name': 'Tester', 'id': 'tester'},
+            'me/tracks': {'items': self.entries, 'total': len(self.entries)},
+            'me/albums': {'items': albums, 'total': len(albums)},
+            'playlists/playlist': {'snapshot_id': 'version'},
+        }[endpoint]
         spotify.list.side_effect = [self.entries, albums,
                                    [{'id': 'playlist', 'name': 'Playlist', 'items': {'href': 'new', 'total': 4}}],
                                    self.entries_for('item')]
-        playlists, result_albums = backup.load_backup(spotify, backup.dump_selection('liked,playlists'))
+        result = backup.load_backup(spotify, backup.dump_selection('liked,playlists'))
+        playlists, result_albums = result['playlists'], result['albums']
         self.assertEqual(playlists, [{'name': 'Liked Songs', 'tracks': self.entries},
                                     {'id': 'playlist', 'name': 'Playlist', 'snapshot_id': 'version', 'tracks': self.entries}])
         self.assertEqual(result_albums, albums)
@@ -399,7 +457,8 @@ class PlaylistCompatibilityTests(unittest.TestCase):
         spotify = Mock()
         spotify.get.return_value = {'id': 'tester', 'display_name': None}
         spotify.list.return_value = []
-        self.assertEqual(backup.load_backup(spotify, backup.dump_selection('playlists')), ([], []))
+        self.assertEqual(backup.load_backup(spotify, backup.dump_selection('playlists')),
+                         {'user': 'tester', 'playlists': [], 'albums': []})
         for profile in (None, {}, {'id': []}):
             with self.subTest(profile=profile):
                 spotify.get.return_value = profile

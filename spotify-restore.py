@@ -2,8 +2,8 @@
 """Restore spotify-backup.py JSON exports. Preview is offline and is the default.
 
 Examples:
-    py -3 spotify-restore.py backup.json --source-user OLD_USER_ID
-    py -3 spotify-restore.py backup.json --source-user OLD_USER_ID --apply \
+    py -3 spotify-restore.py backup.json
+    py -3 spotify-restore.py backup.json --apply \
         --target-user NEW_USER_ID --client-id YOUR_CLIENT_ID
 
 Owned playlists become copies not published on your profile. Followed (including collaborative) playlists
@@ -127,12 +127,16 @@ def media_uris(entries, field, types):
     return uris, skipped
 
 
-def build_plan(data, source_user, followed='follow'):
+def build_plan(data, source_user=None, followed='follow'):
     if (not isinstance(data, dict) or not isinstance(data.get('playlists'), list)
             or not isinstance(data.get('albums'), list)):
         raise RestoreError('Expected a JSON backup with playlists and albums lists.')
-    if not isinstance(source_user, str) or not source_user.strip():
-        raise RestoreError('Supply the original account ID with --source-user.')
+    backup_user = data.get('user')
+    if isinstance(backup_user, str) and source_user is not None and source_user != backup_user:
+        raise RestoreError('--source-user differs from the user recorded in this backup.')
+    source = source_user or backup_user
+    if not isinstance(source, str) or not source.strip():
+        raise RestoreError('Supply --source-user; this backup has no valid user field.')
     if followed not in ('follow', 'copy', 'skip'):
         raise RestoreError('Invalid followed-playlist policy.')
     actions = []
@@ -149,7 +153,7 @@ def build_plan(data, source_user, followed='follow'):
         if (not spotify_id(playlist.get('id')) or not isinstance(owner, dict)
                 or not isinstance(owner.get('id'), str) or not owner['id']):
             raise RestoreError('Playlist ID/owner missing; cannot distinguish owned and followed playlists.')
-        owned = owner['id'] == source_user
+        owned = owner['id'] == source
         kind = 'copy' if owned or followed == 'copy' else followed
         uris, skipped = media_uris(playlist.get('tracks'), 'track', {'track', 'episode'})
         description = playlist.get('description') or ''
@@ -157,6 +161,10 @@ def build_plan(data, source_user, followed='follow'):
             raise RestoreError('Playlist description must be text.')
         actions.append(dict(kind=kind, name=playlist['name'], source_id=playlist['id'],
                             owned=owned, description=description, uris=uris, skipped=skipped))
+    if (source_user is not None and not isinstance(backup_user, str)
+            and any('owned' in action for action in actions)
+            and not any(action.get('owned') for action in actions)):
+        raise RestoreError("--source-user {!r} owns no playlist in this backup. If it is correct, add \"user\": \"{}\" to the backup's top level and omit --source-user.".format(source_user, source_user))
     uris, skipped = media_uris(data['albums'], 'album', {'album'})
     if uris or skipped:
         actions.append(dict(kind='library', name='Saved albums', uris=uris, skipped=skipped))
@@ -410,7 +418,7 @@ def _execute_plan(api, plan, target_user, state_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('file', type=Path, help='JSON backup produced by spotify-backup.py')
-    parser.add_argument('--source-user', required=True, help='original Spotify account ID, not display name')
+    parser.add_argument('--source-user', help='original Spotify account ID for backups without a user field')
     parser.add_argument('--followed', choices=('follow', 'copy', 'skip'), default='follow',
                         help='follow the live original (default), copy backup contents, or skip')
     parser.add_argument('--apply', action='store_true', help='perform Spotify writes; default is offline preview')

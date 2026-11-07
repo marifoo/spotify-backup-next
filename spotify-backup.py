@@ -10,8 +10,8 @@ import http.server
 import json
 import logging
 import os
-import random
 import secrets
+import stat
 import sys
 import tempfile
 import time
@@ -64,14 +64,14 @@ class SpotifyAPI:
 		return url
 
 	# Gets a resource from the Spotify API and returns the object.
-	def get(self, url, params=None, tries=3):
+	def get(self, url, params=None):
 		url = self._url(url, params)
 		# Log the endpoint without query values or exception text, which can
 		# contain credentials supplied by a server, proxy, or HTTP library.
 		resource_path = urllib.parse.urlsplit(url).path
 	
 		attempt, refreshed = 0, False
-		while attempt < tries:
+		while attempt < 3:
 			attempt += 1
 			delay = 2
 			try:
@@ -117,7 +117,7 @@ class SpotifyAPI:
 			for credential in self._credentials:
 				resource = resource.replace(credential, '[redacted]')
 			logging.warning('Could not load %s: %s', resource, message)
-			if not retry or attempt == tries:
+			if not retry or attempt == 3:
 				raise ExportError('Could not load {}: {}'.format(resource, message)) from None
 			logging.info('Trying again in %s seconds...', delay)
 			time.sleep(delay)
@@ -351,6 +351,26 @@ def load_playlist(spotify, playlist):
 	return result
 
 
+def load_library(spotify, endpoint, field, label):
+	items = spotify.list(endpoint, {'limit': 50})
+	page = spotify.get(endpoint, {'limit': 50})
+	message = '{} changed during download. Please retry.'.format(label)
+	if (not isinstance(page, dict) or not isinstance(page.get('items'), list)
+	        or any(not isinstance(entry, dict) for entry in page['items'])
+	        or type(page.get('total')) is not int):
+		raise ExportError(message)
+	def key(entry):
+		media = entry.get(field)
+		if media is not None and not isinstance(media, dict):
+			raise ExportError(message)
+		return entry.get('added_at'), (media or {}).get('uri')
+	if (page['total'] != len(items)
+	        or [key(entry) for entry in page['items']] != [key(entry) for entry in items[:len(page['items'])]]):
+		raise ExportError(message)
+	validate_entries(items, field, label)
+	return items
+
+
 def dump_selection(value):
 	parts = value.split(',')
 	selected = frozenset(parts)
@@ -370,10 +390,8 @@ def load_backup(spotify, dump):
 	liked_albums = []
 	if 'liked' in dump:
 		logging.info('Loading liked albums and songs...')
-		liked_tracks = spotify.list('me/tracks', {'limit': 50})
-		liked_albums = spotify.list('me/albums', {'limit': 50})
-		validate_entries(liked_tracks, 'track', 'Liked Songs')
-		validate_entries(liked_albums, 'album', 'Liked Albums')
+		liked_tracks = load_library(spotify, 'me/tracks', 'track', 'Liked Songs')
+		liked_albums = load_library(spotify, 'me/albums', 'album', 'Liked Albums')
 		playlists.append({'name': 'Liked Songs', 'tracks': liked_tracks})
 	if dump & {'playlists', 'own-playlists'}:
 		logging.info('Loading playlists...')
@@ -390,7 +408,7 @@ def load_backup(spotify, dump):
 			playlist_data = owned
 			logging.info('Selected %s own playlists', len(playlist_data))
 		playlists.extend(load_playlist(spotify, playlist) for playlist in playlist_data)
-	return playlists, liked_albums
+	return {'user': me['id'], 'playlists': playlists, 'albums': liked_albums}
 
 
 def spreadsheet_text(value):
@@ -453,7 +471,7 @@ def check_output_path(filename):
 	try:
 		if '\0' in filename:
 			raise ValueError('filename contains a null character')
-		filename = os.path.abspath(filename)
+		filename = os.path.realpath(filename)
 		if os.path.lexists(filename):
 			if not os.path.isfile(filename):
 				raise OSError('destination is not a regular file')
@@ -468,8 +486,8 @@ def check_output_path(filename):
 	return filename
 
 
-def write_backup(filename, output_format, playlists, liked_albums):
-	filename = os.path.abspath(filename)
+def write_backup(filename, output_format, data):
+	filename = os.path.realpath(filename)
 	temporary = None
 	summaries = None
 	try:
@@ -479,12 +497,14 @@ def write_backup(filename, output_format, playlists, liked_albums):
 		                                 suffix='.tmp', delete=False) as f:
 			temporary = f.name
 			if output_format == 'json':
-				json.dump({'playlists': playlists, 'albums': liked_albums}, f)
+				json.dump(data, f)
 			else:
-				summaries = write_txt(f, playlists, liked_albums)
+				summaries = write_txt(f, data['playlists'], data['albums'])
 			f.flush()
 			os.fsync(f.fileno())
 		# Close first: Windows cannot replace a file while it is open.
+		if os.path.exists(filename):
+			os.chmod(temporary, stat.S_IMODE(os.stat(filename).st_mode))
 		os.replace(temporary, filename)
 	finally:
 		if temporary is not None:
@@ -497,49 +517,25 @@ def write_backup(filename, output_format, playlists, liked_albums):
 	return summaries
 
 
-def sanity_check(filename, output_format, spotify):
+def sanity_check(filename, output_format, expected):
 	if os.path.getsize(filename) == 0:
 		raise ExportError('The saved file is empty')
-	track_ids = set()
 	with open(filename, encoding='utf-8', newline='') as f:
 		if output_format == 'json':
-			data = json.load(f)
-			if (not isinstance(data, dict) or not isinstance(data.get('playlists'), list)
-			        or not isinstance(data.get('albums'), list)
-			        or any(not isinstance(entry, dict) for entry in data['albums'])):
-				raise ExportError('The saved JSON has an invalid backup structure')
-			uris = []
-			for playlist in data['playlists']:
-				if (not isinstance(playlist, dict) or not isinstance(playlist.get('name'), str)
-				        or not isinstance(playlist.get('tracks'), list)
-				        or any(not isinstance(entry, dict) for entry in playlist['tracks'])):
-					raise ExportError('The saved JSON has an invalid playlist structure')
-				validate_entries(playlist['tracks'], 'track', 'saved backup')
-				uris.extend((entry.get('track') or {}).get('uri', '') for entry in playlist['tracks'])
-			validate_entries(data['albums'], 'album', 'saved backup')
+			if json.load(f) != expected:
+				raise ExportError('The saved JSON differs from the downloaded data')
 		else:
 			rows = csv.reader(f, delimiter='\t', strict=True)
 			if next(rows, None) != ['Playlists: ']:
 				raise ExportError('The saved text has an invalid backup header')
-			uris = []
+			count = 0
 			for row in rows:
 				if len(row) not in (0, 1, 5):
 					raise ExportError('The saved text has an invalid row structure')
 				if len(row) == 5:
-					uris.append(row[3])
-	for uri in uris:
-		if isinstance(uri, str) and uri.startswith('spotify:track:'):
-			track_id = uri[len('spotify:track:'):]
-			if track_id.isascii() and track_id.isalnum():
-				track_ids.add(track_id)
-	for track_id in random.sample(sorted(track_ids), min(3, len(track_ids))):
-		track = spotify.get('tracks/' + track_id, tries=1)
-		# A market-specific replacement can still identify the original song.
-		if not isinstance(track, dict):
-			raise ExportError('Spotify did not return a sampled song')
-		linked_from = track.get('linked_from')
-		if track.get('id') != track_id and (not isinstance(linked_from, dict) or linked_from.get('id') != track_id):
-			raise ExportError('Spotify did not confirm a sampled song ID')
+					count += 1
+			if count != expected:
+				raise ExportError('The saved text row count differs from the exported data')
 
 
 def main():
@@ -603,14 +599,14 @@ def main():
 			parser.exit(1, 'Authorization failed: {}\n'.format(err))
 	
 	try:
-		playlists, liked_albums = load_backup(spotify, args.dump)
+		data = load_backup(spotify, args.dump)
 	except ExportError as err:
 		parser.exit(1, 'Export failed: {}\n'.format(err))
 	
 	# Write the file.
 	logging.info('Writing files...')
 	try:
-		summaries = write_backup(args.file, args.format, playlists, liked_albums)
+		summaries = write_backup(args.file, args.format, data)
 	except (OSError, ValueError, TypeError, csv.Error) as err:
 		parser.exit(1, 'Could not write backup to {!r}: {}. Check free disk space and permissions.\n'.format(args.file, err))
 	except KeyboardInterrupt:
@@ -622,9 +618,10 @@ def main():
 
 	logging.info('Wrote file: ' + args.file)
 	try:
-		sanity_check(args.file, args.format, spotify)
-	except (ExportError, OSError, ValueError, TypeError, csv.Error) as err:
+		sanity_check(args.file, args.format, data if args.format == 'json' else sum(exported for _, exported, _ in summaries))
+	except (ExportError, OSError, ValueError, csv.Error) as err:
 		logging.warning('Sanity check failed: %s. The saved backup has been kept.', err)
+		parser.exit(1, 'Sanity check failed: {}. The saved backup has been kept.\n'.format(err))
 	else:
 		logging.info('Sanity check passed.')
 
