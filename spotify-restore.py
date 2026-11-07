@@ -10,6 +10,7 @@ Owned playlists become copies not published on your profile. Followed (including
 are saved by their original ID; use --followed copy for a frozen, independent copy.
 Keep the adjacent .restore-state.json file to resume without repeating completed
 operations. A .lock sidecar prevents simultaneous runs using the same state file.
+Removing a failing playlist from the backup or using --followed skip keeps other progress.
 Keep the lock file; the operating system releases its lock when a process exits.
 If playlist creation has an uncertain outcome, the script stops rather than
 automatically creating a duplicate; inspect the destination and state manually.
@@ -141,6 +142,14 @@ def build_plan(data, source_user=None, followed='follow'):
     if followed not in ('follow', 'copy', 'skip'):
         raise RestoreError('Invalid followed-playlist policy.')
     actions = []
+    keys = set()
+    def add_action(action):
+        key = action.get('key')
+        if key is not None:
+            if key in keys:
+                raise RestoreError('Duplicate restore action key: {}.'.format(key))
+            keys.add(key)
+        actions.append(action)
     for playlist in data['playlists']:
         if not isinstance(playlist, dict) or not isinstance(playlist.get('name'), str):
             raise RestoreError('Backup contains malformed playlist metadata.')
@@ -148,8 +157,8 @@ def build_plan(data, source_user=None, followed='follow'):
         # An actual playlist called Liked Songs still has an ID and is copied.
         if playlist['name'] == 'Liked Songs' and 'id' not in playlist and 'owner' not in playlist:
             uris, skipped = media_uris(playlist.get('tracks'), 'track', {'track'})
-            actions.append(dict(kind='library', name='Liked Songs',
-                                uris=list(reversed(list(dict.fromkeys(uris)))), skipped=skipped))
+            add_action(dict(kind='library', key='library:liked', name='Liked Songs',
+                            uris=list(reversed(list(dict.fromkeys(uris)))), skipped=skipped))
             continue
         owner = playlist.get('owner')
         if (not spotify_id(playlist.get('id')) or not isinstance(owner, dict)
@@ -161,16 +170,19 @@ def build_plan(data, source_user=None, followed='follow'):
         description = playlist.get('description') or ''
         if not isinstance(description, str):
             raise RestoreError('Playlist description must be text.')
-        actions.append(dict(kind=kind, name=playlist['name'], source_id=playlist['id'],
-                            owned=owned, description=html.unescape(description), uris=uris, skipped=skipped))
+        action = dict(kind=kind, name=playlist['name'], source_id=playlist['id'],
+                      owned=owned, description=html.unescape(description), uris=uris, skipped=skipped)
+        if kind != 'skip':
+            action['key'] = kind + ':' + playlist['id']
+        add_action(action)
     if (source_user is not None and not isinstance(backup_user, str)
             and any('owned' in action for action in actions)
             and not any(action.get('owned') for action in actions)):
         raise RestoreError("--source-user {!r} owns no playlist in this backup. If it is correct, add \"user\": \"{}\" to the backup's top level and omit --source-user.".format(source_user, source_user))
     uris, skipped = media_uris(data['albums'], 'album', {'album'})
     if uris or skipped:
-        actions.append(dict(kind='library', name='Saved albums',
-                            uris=list(reversed(list(dict.fromkeys(uris)))), skipped=skipped))
+        add_action(dict(kind='library', key='library:albums', name='Saved albums',
+                        uris=list(reversed(list(dict.fromkeys(uris)))), skipped=skipped))
     return actions
 
 
@@ -275,28 +287,40 @@ def execute_plan(api, plan, target_user, state_path):
         _execute_plan(api, plan, target_user, state_path)
 
 
-def validate_state(state, plan, identity, target_user):
-    if (not isinstance(state, dict) or type(state.get('version')) is not int
-            or state['version'] not in (1, 2)
-            or state.get('identity') != identity or state.get('target_user') != target_user
-            or not isinstance(state.get('actions'), dict)):
-        raise RestoreError('State file does not match this plan and destination.')
+def library_fingerprint(action):
+    return hashlib.sha256(json.dumps(action['uris']).encode('utf-8')).hexdigest()
+
+
+def validate_state(state, plan, target_user):
+    if not isinstance(state, dict) or state.get('version') != 3 or type(state.get('version')) is not int:
+        raise RestoreError('State file was written by an older script version. Starting a new state file can duplicate already-copied playlists.')
+    if state.get('target_user') != target_user or not isinstance(state.get('actions'), dict):
+        raise RestoreError('State file does not match this destination.')
+    known = {action['key']: action for action in plan if 'key' in action}
     playlist_ids = set()
-    valid_keys = {str(i) for i in range(len(plan))}
     for key, progress in state['actions'].items():
-        if (key not in valid_keys or not isinstance(progress, dict)
-                or any(k not in {'done', 'offset', 'creating', 'playlist_id', 'appending'} for k in progress)
+        if not isinstance(key, str):
+            raise RestoreError('State file contains invalid action progress.')
+        if key.startswith('copy:') and isinstance(progress, dict):
+            playlist_id = progress.get('playlist_id')
+            if isinstance(playlist_id, str) and playlist_id in playlist_ids:
+                raise RestoreError('State file contains invalid duplicate destination playlist progress.')
+            if isinstance(playlist_id, str):
+                playlist_ids.add(playlist_id)
+        if key not in known:
+            continue
+        action = known[key]
+        allowed = {'done', 'offset', 'creating', 'playlist_id', 'appending'}
+        if action['kind'] == 'library':
+            allowed.add('fingerprint')
+        if (not isinstance(progress, dict) or any(k not in allowed for k in progress)
                 or any(k in progress and type(progress[k]) is not bool for k in ('done', 'creating'))):
             raise RestoreError('State file contains invalid action progress.')
-        action = plan[int(key)]
         if action['kind'] == 'copy':
             playlist_id = progress.get('playlist_id')
             if ('offset' in progress or ('playlist_id' in progress and not spotify_id(playlist_id))
-                    or (progress.get('done') and not playlist_id)
-                    or (playlist_id and playlist_id in playlist_ids)):
+                    or (progress.get('done') and not playlist_id)):
                 raise RestoreError('State file contains invalid playlist progress.')
-            if playlist_id:
-                playlist_ids.add(playlist_id)
             if 'appending' in progress:
                 pending = progress['appending']
                 if (not playlist_id or progress.get('done')
@@ -305,49 +329,46 @@ def validate_state(state, plan, identity, target_user):
                         or not 0 <= pending['start'] < pending['end'] <= len(action['uris'])
                         or pending['end'] - pending['start'] > 100):
                     raise RestoreError('State file contains invalid pending append progress.')
-            if state['version'] == 1 and playlist_id and not progress.get('done'):
-                raise RestoreError(
-                    'Older journal cannot establish whether an append is still pending. Inspect '
-                    'the destination and let outstanding requests settle, then set version to 2 '
-                    'in this state file before resuming.')
         elif action['kind'] in ('follow', 'library'):
+            if action['kind'] == 'library' and 'fingerprint' in progress:
+                fingerprint = progress['fingerprint']
+                if not isinstance(fingerprint, str):
+                    raise RestoreError('State file contains invalid library fingerprint.')
+                if not progress.get('done') and fingerprint != library_fingerprint(action):
+                    raise RestoreError("Library action '{}' changed since its progress was saved. Remove the '{}' entry from the state file to restart it.".format(action['name'], key))
             total = 1 if action['kind'] == 'follow' else len(action['uris'])
             offset = progress.get('offset', 0)
-            if (type(offset) is not int or not 0 <= offset <= total
-                    or (offset != total and offset % 40 != 0)
-                    or (progress.get('done') and offset != total)
+            if (type(offset) is not int or offset < 0
+                    or (not progress.get('done') and (offset > total or (offset != total and offset % 40 != 0)))
+                    or (action['kind'] == 'follow' and progress.get('done') and offset != total)
                     or 'playlist_id' in progress or 'creating' in progress or 'appending' in progress):
                 raise RestoreError('State file contains invalid library progress.')
         else:
             raise RestoreError('State file contains progress for a skipped action.')
-
 
 def _execute_plan(api, plan, target_user, state_path):
     me = api.get('me')
     if not isinstance(me, dict) or me.get('id') != target_user:
         raise RestoreError('Logged-in account does not match --target-user. No Spotify writes made.')
     print('Destination: {!r} ({!r})'.format(me.get('display_name') or target_user, target_user))
-    identity = hashlib.sha256(json.dumps(
-        {'plan': plan, 'target': target_user}, sort_keys=True).encode('utf-8')).hexdigest()
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding='utf-8'))
-        validate_state(state, plan, identity, target_user)
-        if state['version'] == 1:
-            state['version'] = 2
-            save_state(state_path, state)
+        validate_state(state, plan, target_user)
     else:
-        state = dict(version=2, identity=identity, target_user=target_user, actions={})
+        state = dict(version=3, target_user=target_user, actions={})
         save_state(state_path, state)
 
     track_cache = {}
-    for index, action in enumerate(plan):
+    for action in plan:
         if action['kind'] == 'skip':
             continue
-        progress = state['actions'].setdefault(str(index), {})
+        progress = state['actions'].setdefault(action['key'], {})
         if progress.get('done'):
             continue
         print('{}: {!r}'.format(action['kind'], action['name']))
         if action['kind'] in ('follow', 'library'):
+            if action['kind'] == 'library':
+                progress['fingerprint'] = library_fingerprint(action)
             uris = (['spotify:playlist:' + action['source_id']]
                     if action['kind'] == 'follow' else action['uris'])
             offset = progress.get('offset', 0)
@@ -362,7 +383,7 @@ def _execute_plan(api, plan, target_user, state_path):
                         'Playlist creation outcome is uncertain for action {} ({}). Inspect the '
                         'destination before editing the state: set playlist_id to the created playlist '
                         'ID, or remove creating only if no playlist was created. Keep this state file.'
-                        .format(index, repr(action['name'])))
+                        .format(action['key'], repr(action['name'])))
                 progress['creating'] = True
                 save_state(state_path, state)
                 try:
@@ -395,7 +416,7 @@ def _execute_plan(api, plan, target_user, state_path):
                     'Playlist append outcome is uncertain for action {} ({}). The original request '
                     'may still commit. Wait and resume; if its items remain absent, inspect the '
                     'destination and confirm the request has settled before manually removing '
-                    'appending from this action in the state file.'.format(index, repr(action['name'])))
+                    'appending from this action in the state file.'.format(action['key'], repr(action['name'])))
             # Reconcile actual contents after an interrupted append before sending more.
             for start in range(len(existing), len(expected), 100):
                 batch = expected[start:start + 100]

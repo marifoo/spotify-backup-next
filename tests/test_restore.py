@@ -17,8 +17,8 @@ def tracks(*ids):
     return [{'track': {'uri': 'spotify:track:' + value}} for value in ids]
 
 
-def playlist(name='Own', owner='old', ids=('a', 'b', 'a')):
-    return dict(id='original', name=name, owner={'id': owner}, tracks=tracks(*ids))
+def playlist(name='Own', owner='old', ids=('a', 'b', 'a'), id='original'):
+    return dict(id=id, name=name, owner={'id': owner}, tracks=tracks(*ids))
 
 
 def data(*playlists):
@@ -91,9 +91,9 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(plan[0]['kind'], 'follow')
 
     def test_owned_followed_collaborative_and_liked_name_collision(self):
-        followed = playlist('Shared', owner='other')
+        followed = playlist('Shared', owner='other', id='followed')
         followed['collaborative'] = True
-        source = data(playlist(), followed, playlist('Liked Songs'),
+        source = data(playlist(), followed, playlist('Liked Songs', id='likedname'),
                       {'name': 'Liked Songs', 'tracks': tracks('liked')})
         source['albums'] = [{'album': {'uri': 'spotify:album:album1'}}]
         plan = restore.build_plan(source)
@@ -208,7 +208,7 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaises(restore.RejectedWrite):
                 self.run_plan(api, plan)
         state = json.loads(self.state.read_text())
-        self.assertEqual(state['actions']['0']['appending'], {'start': 0, 'end': 100})
+        self.assertEqual(state['actions']['copy:original']['appending'], {'start': 0, 'end': 100})
         before = len(api.writes)
         with patch.object(api, 'list', return_value=[]):
             with self.assertRaisesRegex(restore.RestoreError, 'append outcome is uncertain'):
@@ -223,7 +223,7 @@ class RestoreTests(unittest.TestCase):
         original_save = restore.save_state
 
         def fail_append_marker(path, state):
-            if 'appending' in state['actions'].get('0', {}):
+            if 'appending' in state['actions'].get('copy:original', {}):
                 raise OSError('Journal storage failed')
             original_save(path, state)
 
@@ -260,42 +260,146 @@ class RestoreTests(unittest.TestCase):
         self.run_plan(api, plan)
         self.assertEqual(api.writes[0][2]['description'], "Rock & Roll's")
 
-    def test_state_does_not_apply_to_different_plan(self):
+    def test_permanent_rejection_then_skip_keeps_completed_copies(self):
+        source = data(playlist(), playlist('Blocked', owner='other', id='blocked'))
         api = FakeAPI()
-        self.run_plan(api, restore.build_plan(data(playlist()), 'old'))
+        original_write = api.write
+
+        def reject_follow(method, endpoint, body=None, params=None):
+            if endpoint == 'me/library':
+                raise restore.RejectedWrite('permanent rejection')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=reject_follow):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, restore.build_plan(source))
+        self.run_plan(api, restore.build_plan(source, followed='skip'))
+        self.assertEqual(len([write for write in api.writes if write[1] == 'me/playlists']), 1)
+        self.assertNotIn('key', restore.build_plan(source, followed='skip')[1])
+
+    def test_removed_playlist_keeps_other_progress(self):
+        source = data(playlist(), playlist('Blocked', owner='other', id='blocked'))
+        api = FakeAPI()
+        original_write = api.write
+
+        def reject_follow(method, endpoint, body=None, params=None):
+            if endpoint == 'me/library':
+                raise restore.RejectedWrite('permanent rejection')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=reject_follow):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, restore.build_plan(source))
+        state = json.loads(self.state.read_text())
+        state['actions']['follow:blocked'] = {'offset': 0}
+        self.state.write_text(json.dumps(state))
+        self.run_plan(api, restore.build_plan(data(source['playlists'][0])))
+        self.assertEqual(len([write for write in api.writes if write[1] == 'me/playlists']), 1)
+        self.assertIn('follow:blocked', json.loads(self.state.read_text())['actions'])
+
+    def test_changed_unfinished_library_action_stops_before_writes(self):
+        source = data({'name': 'Liked Songs', 'tracks': tracks(*map(str, range(81)))})
+        api = FakeAPI()
+        original_write = api.write
+        sends = 0
+
+        def reject_second(method, endpoint, body=None, params=None):
+            nonlocal sends
+            sends += 1
+            if sends == 2:
+                raise restore.RejectedWrite('permanent rejection')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=reject_second):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, restore.build_plan(source))
+        source['playlists'][0]['tracks'] = tracks('changed')
+        before = len(api.writes)
+        message = "Library action 'Liked Songs' changed since its progress was saved. Remove the 'library:liked' entry from the state file to restart it."
+        with self.assertRaises(restore.RestoreError) as caught:
+            self.run_plan(api, restore.build_plan(source))
+        self.assertEqual(str(caught.exception), message)
+        self.assertEqual(len(api.writes), before)
+
+    def test_library_entry_without_fingerprint_is_accepted_and_stamped(self):
+        source = data({'name': 'Liked Songs', 'tracks': tracks(*map(str, range(81)))})
+        plan = restore.build_plan(source)
+        state = {'version': 3, 'target_user': 'new', 'actions': {'library:liked': {'offset': 40}}}
+        self.state.write_text(json.dumps(state))
+        api = FakeAPI()
+        self.run_plan(api, plan)
+        progress = json.loads(self.state.read_text())['actions']['library:liked']
+        self.assertEqual(progress['fingerprint'], restore.library_fingerprint(plan[0]))
+        self.assertTrue(progress['done'])
+        self.assertEqual(len(api.writes), 2)
+
+    def test_copy_with_edited_unsent_tail_resumes_without_new_playlist(self):
+        source = data(playlist(ids=tuple(map(str, range(105)))))
+        api = FakeAPI()
+        original_write = api.write
+        sends = 0
+
+        def reject_second_append(method, endpoint, body=None, params=None):
+            nonlocal sends
+            if endpoint.endswith('/items'):
+                sends += 1
+                if sends == 2:
+                    raise restore.RejectedWrite('permanent rejection')
+            return original_write(method, endpoint, body, params)
+
+        with patch.object(api, 'write', side_effect=reject_second_append):
+            with self.assertRaises(restore.RejectedWrite):
+                self.run_plan(api, restore.build_plan(source))
+        source['playlists'][0]['tracks'].pop()
+        self.run_plan(api, restore.build_plan(source))
+        self.assertEqual(len([write for write in api.writes if write[1] == 'me/playlists']), 1)
+        self.assertEqual(api.contents, restore.build_plan(source)[0]['uris'])
+
+    def test_changed_finished_action_is_not_repeated(self):
+        api = FakeAPI()
+        self.run_plan(api, restore.build_plan(data(playlist())))
+        before = len(api.writes)
+        self.run_plan(api, restore.build_plan(data(playlist(ids=('changed',)))))
+        self.assertEqual(len(api.writes), before)
+
+    def test_completed_library_changed_count_is_skipped(self):
+        source = data({'name': 'Liked Songs', 'tracks': tracks('a', 'b')})
+        api = FakeAPI()
+        self.run_plan(api, restore.build_plan(source))
+        before = len(api.writes)
+        source['playlists'][0]['tracks'] = tracks('changed')
+        self.run_plan(api, restore.build_plan(source))
+        self.assertEqual(len(api.writes), before)
+
+    def test_duplicate_action_keys_rejected(self):
+        with self.assertRaisesRegex(restore.RestoreError, 'Duplicate restore action key'):
+            restore.build_plan(data(playlist(), playlist(name='Second')))
+
+    def test_state_does_not_apply_to_different_target(self):
+        api = FakeAPI()
+        plan = restore.build_plan(data(playlist()))
+        self.run_plan(api, plan)
+        state = json.loads(self.state.read_text())
+        state['target_user'] = 'someoneelse'
+        self.state.write_text(json.dumps(state))
         before = len(api.writes)
         with self.assertRaisesRegex(restore.RestoreError, 'does not match'):
-            self.run_plan(api, restore.build_plan(data(playlist(name='Changed')), 'old'))
-        self.assertEqual(len(api.writes), before)
-
-    def test_older_incomplete_copy_journal_requires_explicit_recovery(self):
-        api = FakeAPI()
-        plan = restore.build_plan(data(playlist()), 'old')
-        self.run_plan(api, plan)
-        state = json.loads(self.state.read_text())
-        state['version'] = 1
-        state['actions']['0'].pop('done')
-        self.state.write_text(json.dumps(state))
-        before = len(api.writes)
-        with self.assertRaisesRegex(restore.RestoreError, 'Older journal'):
             self.run_plan(api, plan)
         self.assertEqual(len(api.writes), before)
-        state['version'] = 2
-        self.state.write_text(json.dumps(state))
-        self.run_plan(api, plan)
-        self.assertEqual(len(api.writes), before)
 
-    def test_older_completed_journal_upgrades_without_repeating_writes(self):
+    def test_old_journal_version_rejected_before_writes(self):
         api = FakeAPI()
-        plan = restore.build_plan(data(playlist()), 'old')
+        plan = restore.build_plan(data(playlist()))
         self.run_plan(api, plan)
         state = json.loads(self.state.read_text())
-        state['version'] = 1
-        self.state.write_text(json.dumps(state))
         before = len(api.writes)
-        self.run_plan(api, plan)
-        self.assertEqual(len(api.writes), before)
-        self.assertEqual(json.loads(self.state.read_text())['version'], 2)
+        for version in (1, 2):
+            with self.subTest(version=version):
+                old = dict(state, version=version)
+                self.state.write_text(json.dumps(old))
+                with self.assertRaisesRegex(restore.RestoreError, 'older script version.*duplicate'):
+                    self.run_plan(api, plan)
+                self.assertEqual(len(api.writes), before)
 
     def test_path_resolution_errors_stop_cleanly_before_login(self):
         with (
@@ -386,7 +490,7 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaises(restore.RejectedWrite):
                 self.run_plan(api, plan)
         self.assertEqual(mock_send.call_count, 2)
-        self.assertNotIn('creating', json.loads(self.state.read_text())['actions']['0'])
+        self.assertNotIn('creating', json.loads(self.state.read_text())['actions']['copy:original'])
 
     def test_write_retries_429_after_retry_after(self):
         api = restore.WriteAPI('token')
@@ -480,7 +584,7 @@ class RestoreTests(unittest.TestCase):
                     with self.assertRaises(restore.RestoreError):
                         with patch.object(api, 'write', side_effect=restore.WriteAPI('token').write):
                             restore.execute_plan(api, plan, 'new', state)
-                pending = json.loads(state.read_text())['actions']['0'].get('creating', False)
+                pending = json.loads(state.read_text())['actions']['copy:original'].get('creating', False)
                 self.assertEqual(send.call_count, 3 if status == 429 else 1)
                 self.assertEqual(pending, status == 500)
                 if status != 500:
@@ -531,19 +635,18 @@ class RestoreTests(unittest.TestCase):
 
     def test_invalid_journal_actions_fail_before_any_write(self):
         source = data(playlist(), {'name': 'Liked Songs', 'tracks': tracks('a', 'b')})
-        plan = restore.build_plan(source, 'old')
+        plan = restore.build_plan(source)
         api = FakeAPI()
         self.run_plan(api, plan)
         original = json.loads(self.state.read_text())
         invalid = [None, [], {'offset': 999}, {'offset': -1}, {'offset': True},
-                   {'offset': '1'}, {'done': 'yes'}, {'done': True},
-                   {'offset': 1}, {'playlist_id': 'wrong'}, {'creating': True},
-                   {'appending': {'start': 0, 'end': 1}}]
+                   {'offset': '1'}, {'done': 'yes'}, {'offset': 1},
+                   {'playlist_id': 'wrong'}, {'creating': True},
+                   {'appending': {'start': 0, 'end': 1}}, {'fingerprint': None}]
         for progress in invalid:
             with self.subTest(progress=progress):
                 state = json.loads(json.dumps(original))
-                # The invalid later entry must be checked before replaying this first action.
-                state['actions'] = {'0': {}, '1': progress}
+                state['actions'] = {'copy:original': {}, 'library:liked': progress}
                 self.state.write_text(json.dumps(state))
                 before = len(api.writes)
                 with self.assertRaisesRegex(restore.RestoreError, 'invalid'):
@@ -551,28 +654,26 @@ class RestoreTests(unittest.TestCase):
                 self.assertEqual(len(api.writes), before)
 
     def test_invalid_copy_progress_and_duplicate_destinations_are_rejected(self):
-        plan = restore.build_plan(data(playlist(), playlist(name='Second')), 'old')
-        identity = 'test-identity'
+        plan = restore.build_plan(data(playlist(), playlist(name='Second', id='second')))
         invalid = [
-            {'0': {'offset': 0}},
-            {'0': {'playlist_id': '../escape'}},
-            {'0': {'done': True}},
-            {'0': {'creating': 'true'}},
-            {'0': {'playlist_id': 'same'}, '1': {'playlist_id': 'same'}},
-            {'2': {}},
+            {'copy:original': {'offset': 0}},
+            {'copy:original': {'playlist_id': '../escape'}},
+            {'copy:original': {'done': True}},
+            {'copy:original': {'creating': 'true'}},
+            {'copy:original': {'playlist_id': 'same'}, 'copy:second': {'playlist_id': 'same'}},
+            {'copy:original': {'playlist_id': 'same'}, 'copy:gone': {'playlist_id': 'same'}},
         ]
         for actions in invalid:
             with self.subTest(actions=actions):
-                state = dict(version=2, identity=identity, target_user='new', actions=actions)
+                state = dict(version=3, target_user='new', actions=actions)
                 with self.assertRaisesRegex(restore.RestoreError, 'invalid'):
-                    restore.validate_state(state, plan, identity, 'new')
-        # Manual creation recovery deliberately keeps creating until the ID is supplied.
-        state = dict(version=2, identity=identity, target_user='new',
-                     actions={'0': {'creating': True, 'playlist_id': 'recovered'}})
-        restore.validate_state(state, plan, identity, 'new')
+                    restore.validate_state(state, plan, 'new')
+        state = dict(version=3, target_user='new',
+                     actions={'copy:original': {'creating': True, 'playlist_id': 'recovered'}})
+        restore.validate_state(state, plan, 'new')
 
     def test_invalid_pending_append_progress_is_rejected(self):
-        plan = restore.build_plan(data(playlist(ids=tuple(map(str, range(205))))), 'old')
+        plan = restore.build_plan(data(playlist(ids=tuple(map(str, range(205))))))
         invalid = [None, [], {}, {'start': 0}, {'start': 0, 'end': 206},
                    {'start': -1, 'end': 1}, {'start': 0, 'end': 101},
                    {'start': True, 'end': 1}, {'start': 0, 'end': '1'},
@@ -580,16 +681,16 @@ class RestoreTests(unittest.TestCase):
                    {'start': 0, 'end': 1, 'extra': 1}]
         for pending in invalid:
             with self.subTest(pending=pending):
-                state = dict(version=2, identity='test', target_user='new', actions={
-                    '0': {'playlist_id': 'created', 'appending': pending}})
+                state = dict(version=3, target_user='new', actions={
+                    'copy:original': {'playlist_id': 'created', 'appending': pending}})
                 with self.assertRaisesRegex(restore.RestoreError, 'invalid pending append'):
-                    restore.validate_state(state, plan, 'test', 'new')
+                    restore.validate_state(state, plan, 'new')
         for extra in ({'done': True}, {'playlist_id': None}):
             progress = {'playlist_id': 'created', 'appending': {'start': 0, 'end': 100}}
             progress.update(extra)
-            state = dict(version=2, identity='test', target_user='new', actions={'0': progress})
+            state = dict(version=3, target_user='new', actions={'copy:original': progress})
             with self.assertRaisesRegex(restore.RestoreError, 'invalid'):
-                restore.validate_state(state, plan, 'test', 'new')
+                restore.validate_state(state, plan, 'new')
 
     def test_relinked_backup_restores_original_across_destination_markets(self):
         source = playlist(ids=())

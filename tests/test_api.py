@@ -126,6 +126,22 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         sleep.assert_not_called()
 
+    def test_get_401_refresh_does_not_spend_retry_budget(self):
+        api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='refresh')
+        statuses = [429, 401, 429, 429]
+
+        def send(request, timeout):
+            if request.full_url.endswith('/api/token'):
+                return io.BytesIO(b'{"access_token":"new-access"}')
+            raise self.http_error(status=statuses.pop(0))
+
+        with patch.object(backup.urllib.request, 'urlopen', side_effect=send) as mock_send, \
+                patch.object(backup.time, 'sleep') as sleep:
+            with self.assertRaises(backup.ExportError):
+                api.get('me')
+        self.assertEqual(mock_send.call_count, 5)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_get_refresh_failure_raises_export_error(self):
         api = backup.SpotifyAPI('old-access', client_id='client', refresh_token='old-refresh')
 
