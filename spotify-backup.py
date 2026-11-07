@@ -612,7 +612,7 @@ def main():
 			data = load_backup(spotify, args.dump)
 		except ExportError as err:
 			parser.exit(1, 'Export failed: {}\n'.format(err))
-	
+
 		# Write the file.
 		logging.info('Writing files...')
 		try:
