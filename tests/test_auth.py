@@ -92,7 +92,7 @@ class AuthenticationTests(unittest.TestCase):
             self.assertEqual(captured['code_challenge_method'], ['S256'])
             self.assertEqual(captured['scope'], ['scope'])
             self.assertEqual(captured['redirect_uri'], [redirect])
-            return 'access-token'
+            return {'access_token': 'access-token', 'refresh_token': 'refresh-token'}
 
         with patch.object(API, '_SERVER_PORT', 0), patch.object(backup.webbrowser, 'open', side_effect=open_browser), patch.object(API, '_exchange_authorization_code', side_effect=exchange):
             # Use an allocated port because the redirect must match the listener.
@@ -101,15 +101,29 @@ class AuthenticationTests(unittest.TestCase):
             with patch.object(API, '_SERVER_PORT', port):
                 result = API.authorize('client', 'scope')
             self.assertEqual(result._auth, 'access-token')
+            self.assertEqual(result._refresh_token, 'refresh-token')
             connection = captured['connection']
             self.assertEqual(connection.getresponse().status, 200)
             connection.close()
             with API._AuthorizationServer(('127.0.0.1', port), API._AuthorizationHandler):
                 pass
 
+    def test_authorize_returns_instance_of_calling_class(self):
+        from tests.test_restore import restore
+
+        with patch.object(restore.WriteAPI, '_AuthorizationServer') as factory, \
+                patch.object(backup.webbrowser, 'open'), \
+                patch.object(restore.WriteAPI, '_exchange_authorization_code',
+                             return_value={'access_token': 'access', 'refresh_token': 'refresh'}):
+            server = factory.return_value.__enter__.return_value
+            server.handle_request.side_effect = lambda: setattr(server, 'code', 'code')
+            result = restore.WriteAPI.authorize('client', 'scope')
+        self.assertIsInstance(result, restore.WriteAPI)
+        self.assertEqual((result._auth, result._refresh_token), ('access', 'refresh'))
+
     def test_token_request_and_failures(self):
         with patch.object(backup.urllib.request, 'urlopen', return_value=io.BytesIO(b'{"access_token":"token"}')) as send:
-            self.assertEqual(API._exchange_authorization_code('client', 'verifier', 'http://redirect', 'a+b'), 'token')
+            self.assertEqual(API._exchange_authorization_code('client', 'verifier', 'http://redirect', 'a+b'), {'access_token': 'token'})
             request = send.call_args.args[0]
             self.assertEqual(request.full_url, 'https://accounts.spotify.com/api/token')
             self.assertEqual(urllib.parse.parse_qs(request.data.decode())['code'], ['a+b'])

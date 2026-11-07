@@ -421,8 +421,8 @@ def main(argv=None):
             return 0
         scopes = ('playlist-modify-private playlist-modify-public user-library-modify '
                   'playlist-read-private playlist-read-collaborative')
-        session = backup.SpotifyAPI.authorize(args.client_id, scopes)
-        execute_plan(WriteAPI(session._auth), plan, args.target_user, state_path)
+        api = WriteAPI.authorize(args.client_id, scopes)
+        execute_plan(api, plan, args.target_user, state_path)
         print('Restore complete. Keep {} for future resumes.'.format(state_path))
         return 0
     except (OSError, ValueError, RestoreError, backup.ExportError,

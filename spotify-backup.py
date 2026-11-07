@@ -31,8 +31,11 @@ class ExportError(Exception):
 class SpotifyAPI:
 	
 	# Requires an OAuth token.
-	def __init__(self, auth):
+	def __init__(self, auth, client_id=None, refresh_token=None):
 		self._auth = auth
+		self._client_id = client_id
+		self._refresh_token = refresh_token
+		self._credentials = {value for value in (auth, refresh_token) if value}
 	
 	@staticmethod
 	def _url(url, params=None):
@@ -151,20 +154,20 @@ class SpotifyAPI:
 				logging.info('Loaded %s/%s items', len(items), expected_total if expected_total is not None else 'unknown')
 			url, params = response['next'], None
 	
-	@staticmethod
-	def authorize(client_id, scope):
+	@classmethod
+	def authorize(cls, client_id, scope):
 		verifier = secrets.token_urlsafe(48)
 		challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('ascii')).digest()).rstrip(b'=').decode('ascii')
 		state = secrets.token_urlsafe(32)
-		redirect_uri = 'http://127.0.0.1:{}/redirect'.format(SpotifyAPI._SERVER_PORT)
+		redirect_uri = 'http://127.0.0.1:{}/redirect'.format(cls._SERVER_PORT)
 		url = 'https://accounts.spotify.com/authorize?' + urllib.parse.urlencode({
 			'response_type': 'code', 'client_id': client_id, 'scope': scope,
 			'redirect_uri': redirect_uri, 'state': state,
 			'code_challenge_method': 'S256', 'code_challenge': challenge
 		})
 		try:
-			with SpotifyAPI._AuthorizationServer(('127.0.0.1', SpotifyAPI._SERVER_PORT),
-			                                     SpotifyAPI._AuthorizationHandler) as server:
+			with cls._AuthorizationServer(('127.0.0.1', cls._SERVER_PORT),
+			                              cls._AuthorizationHandler) as server:
 				server.state, server.code, server.error = state, None, None
 				deadline = time.monotonic() + 300
 				logging.info(f'Logging in (click if it does not open automatically): {url}')
@@ -172,22 +175,27 @@ class SpotifyAPI:
 				while server.code is None and server.error is None:
 					remaining = deadline - time.monotonic()
 					if remaining <= 0:
-						raise SpotifyAPI.AuthorizationError('Login timed out. Run the script again to retry.')
+						raise cls.AuthorizationError('Login timed out. Run the script again to retry.')
 					server.timeout = min(1, remaining)
 					server.handle_request()
 				if server.error:
-					raise SpotifyAPI.AuthorizationError(server.error)
+					raise cls.AuthorizationError(server.error)
 				code = server.code
 		except OSError as err:
-			raise SpotifyAPI.AuthorizationError('Could not start or use the local login server: {}'.format(err)) from None
-		return SpotifyAPI(SpotifyAPI._exchange_authorization_code(client_id, verifier, redirect_uri, code))
+			raise cls.AuthorizationError('Could not start or use the local login server. Check the local port and retry.') from None
+		token = cls._exchange_authorization_code(client_id, verifier, redirect_uri, code)
+		return cls(token['access_token'], client_id=client_id, refresh_token=token.get('refresh_token'))
 
 	@staticmethod
 	def _exchange_authorization_code(client_id, verifier, redirect_uri, code):
-		data = urllib.parse.urlencode({
+		return SpotifyAPI._token_request({
 			'grant_type': 'authorization_code', 'client_id': client_id,
 			'code_verifier': verifier, 'redirect_uri': redirect_uri, 'code': code
-		}).encode('ascii')
+		})
+
+	@staticmethod
+	def _token_request(fields):
+		data = urllib.parse.urlencode(fields).encode('ascii')
 		req = urllib.request.Request('https://accounts.spotify.com/api/token', data=data,
 		                             headers={'Content-Type': 'application/x-www-form-urlencoded'})
 		try:
@@ -202,7 +210,7 @@ class SpotifyAPI:
 			raise SpotifyAPI.AuthorizationError('Could not complete Spotify login. Check your connection and retry.') from None
 		if not isinstance(result, dict) or not isinstance(result.get('access_token'), str) or not result['access_token']:
 			raise SpotifyAPI.AuthorizationError('Spotify did not return an access token. Please retry login.')
-		return result['access_token']
+		return result
 
 	_SERVER_PORT = 43019
 
