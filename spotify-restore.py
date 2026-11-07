@@ -32,6 +32,7 @@ https://developer.spotify.com/documentation/web-api/reference/save-library-items
 import argparse
 from contextlib import contextmanager
 import hashlib
+import html
 import http.client
 import importlib.util
 import json
@@ -147,7 +148,8 @@ def build_plan(data, source_user=None, followed='follow'):
         # An actual playlist called Liked Songs still has an ID and is copied.
         if playlist['name'] == 'Liked Songs' and 'id' not in playlist and 'owner' not in playlist:
             uris, skipped = media_uris(playlist.get('tracks'), 'track', {'track'})
-            actions.append(dict(kind='library', name='Liked Songs', uris=uris, skipped=skipped))
+            actions.append(dict(kind='library', name='Liked Songs',
+                                uris=list(reversed(list(dict.fromkeys(uris)))), skipped=skipped))
             continue
         owner = playlist.get('owner')
         if (not spotify_id(playlist.get('id')) or not isinstance(owner, dict)
@@ -160,14 +162,15 @@ def build_plan(data, source_user=None, followed='follow'):
         if not isinstance(description, str):
             raise RestoreError('Playlist description must be text.')
         actions.append(dict(kind=kind, name=playlist['name'], source_id=playlist['id'],
-                            owned=owned, description=description, uris=uris, skipped=skipped))
+                            owned=owned, description=html.unescape(description), uris=uris, skipped=skipped))
     if (source_user is not None and not isinstance(backup_user, str)
             and any('owned' in action for action in actions)
             and not any(action.get('owned') for action in actions)):
         raise RestoreError("--source-user {!r} owns no playlist in this backup. If it is correct, add \"user\": \"{}\" to the backup's top level and omit --source-user.".format(source_user, source_user))
     uris, skipped = media_uris(data['albums'], 'album', {'album'})
     if uris or skipped:
-        actions.append(dict(kind='library', name='Saved albums', uris=uris, skipped=skipped))
+        actions.append(dict(kind='library', name='Saved albums',
+                            uris=list(reversed(list(dict.fromkeys(uris)))), skipped=skipped))
     return actions
 
 
@@ -308,7 +311,7 @@ def validate_state(state, plan, identity, target_user):
                     'the destination and let outstanding requests settle, then set version to 2 '
                     'in this state file before resuming.')
         elif action['kind'] in ('follow', 'library'):
-            total = 1 if action['kind'] == 'follow' else len(set(action['uris']))
+            total = 1 if action['kind'] == 'follow' else len(action['uris'])
             offset = progress.get('offset', 0)
             if (type(offset) is not int or not 0 <= offset <= total
                     or (offset != total and offset % 40 != 0)
@@ -346,7 +349,7 @@ def _execute_plan(api, plan, target_user, state_path):
         print('{}: {!r}'.format(action['kind'], action['name']))
         if action['kind'] in ('follow', 'library'):
             uris = (['spotify:playlist:' + action['source_id']]
-                    if action['kind'] == 'follow' else list(dict.fromkeys(action['uris'])))
+                    if action['kind'] == 'follow' else action['uris'])
             offset = progress.get('offset', 0)
             for start in range(offset, len(uris), 40):
                 api.write('PUT', 'me/library', params={'uris': ','.join(uris[start:start + 40])})

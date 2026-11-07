@@ -241,6 +241,24 @@ class RestoreTests(unittest.TestCase):
         self.run_plan(api, plan)
         self.assertEqual(api.writes[0], ('PUT', 'me/library', None, {'uris': 'spotify:playlist:original'}))
         self.assertEqual([len(w[3]['uris'].split(',')) for w in api.writes], [1, 40, 40, 1])
+        self.assertEqual([uri for write in api.writes[1:] for uri in write[3]['uris'].split(',')],
+                         ['spotify:track:' + str(i) for i in reversed(range(81))])
+
+    def test_library_saved_oldest_first_and_deduplicated(self):
+        source = data({'name': 'Liked Songs', 'tracks': tracks('c', 'b', 'a', 'b')})
+        plan = restore.build_plan(source)
+        self.assertEqual(plan[0]['uris'], ['spotify:track:a', 'spotify:track:b', 'spotify:track:c'])
+        api = FakeAPI()
+        self.run_plan(api, plan)
+        self.assertEqual(api.writes[0][3]['uris'], 'spotify:track:a,spotify:track:b,spotify:track:c')
+
+    def test_description_html_entities_unescaped(self):
+        source = playlist()
+        source['description'] = 'Rock &amp; Roll&#x27;s'
+        plan = restore.build_plan(data(source))
+        api = FakeAPI()
+        self.run_plan(api, plan)
+        self.assertEqual(api.writes[0][2]['description'], "Rock & Roll's")
 
     def test_state_does_not_apply_to_different_plan(self):
         api = FakeAPI()
